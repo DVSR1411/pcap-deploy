@@ -1,0 +1,4 @@
+Flask
+elasticsearch==8.13.0
+python-dotenv
+pyzeek

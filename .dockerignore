@@ -1,0 +1,50 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+myenv/
+venv/
+env/
+ENV/
+
+# Environment variables (SECURITY)
+.env
+.env.*
+!.env.example
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Git
+.git/
+.gitignore
+
+# Data directories (mount as volumes instead)
+zeek_uploads/
+zeek_logs/
+backups/
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.temp
+.DS_Store
+
+# Docker
+docker-compose.yml
+Dockerfile
+
+# Documentation
+README.md
+*.md
+
+# Test files
+test_*.py
+*_test.py
