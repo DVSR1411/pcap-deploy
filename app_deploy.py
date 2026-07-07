@@ -779,4 +779,4 @@ def ceph_delete_object(bucket, key):
 
 # ============= MAIN =============
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', debug=False, port=8000)
+    app.run(host='0.0.0.0', debug=False, port=5000)
