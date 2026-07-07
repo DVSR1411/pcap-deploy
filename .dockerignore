@@ -1,0 +1,29 @@
+# Python cache
+__pycache__/
+myenv/
+
+# Environment variables
+.env
+.env.*
+!.env.example
+
+# Data (mounted as volumes)
+zeek_logs/
+zeek_uploads/
+
+# Dev/test files
+test/
+test_*.py
+*_test.py
+conftest.py
+coverage.xml
+.coverage
+.pytest_cache/
+
+# Misc
+.git/
+.gitignore
+*.md
+*.log
+*.mmdb
+sonar-project.properties

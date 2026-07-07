@@ -1,0 +1,13 @@
+__pycache__/
+zeek_logs/
+.pytest_cache/
+myenv/
+.env
+*.mmdb
+*.json
+sonar-project.properties
+.coverage
+coverage.xml
+conftest.py
+test/
+*.tar

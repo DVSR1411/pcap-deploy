@@ -1,0 +1,114 @@
+version: "3.8"
+
+networks:
+  ceph-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: ${CEPH_PUBLIC_NETWORK}
+
+services:
+
+  ceph-mon:
+    image: quay.io/ceph/daemon:latest-quincy
+    container_name: ceph-mon
+    hostname: mon
+    privileged: true
+    restart: unless-stopped
+    environment:
+      CEPH_DAEMON: MON
+      MON_IP: ${CEPH_MON_IP}
+      CEPH_PUBLIC_NETWORK: ${CEPH_PUBLIC_NETWORK}
+      NETWORK_AUTO_DETECT: "0"
+    volumes:
+      - ${CEPH_DATA_PATH}/etc/ceph:/etc/ceph
+      - ${CEPH_DATA_PATH}/lib/ceph:/var/lib/ceph
+    networks:
+      ceph-net:
+        ipv4_address: ${CEPH_MON_IP}
+    mem_limit: 2g
+
+  ceph-mgr:
+    image: quay.io/ceph/daemon:latest-quincy
+    container_name: ceph-mgr
+    hostname: mgr
+    privileged: true
+    restart: unless-stopped
+    environment:
+      CEPH_DAEMON: MGR
+    volumes:
+      - ${CEPH_DATA_PATH}/etc/ceph:/etc/ceph
+      - ${CEPH_DATA_PATH}/lib/ceph:/var/lib/ceph
+    networks:
+      ceph-net:
+        ipv4_address: ${CEPH_MGR_IP}
+    ports:
+      - "7000:7000"
+    depends_on:
+      - ceph-mon
+    mem_limit: 2g
+
+  ceph-osd1:
+    image: quay.io/ceph/daemon:latest-quincy
+    container_name: ceph-osd1
+    hostname: osd1
+    privileged: true
+    restart: unless-stopped
+    environment:
+      CEPH_DAEMON: OSD_DIRECTORY_SINGLE
+      OSD_DIRECTORY: /var/lib/ceph/osd/osd1
+    volumes:
+      - ${CEPH_DATA_PATH}/etc/ceph:/etc/ceph
+      - ${CEPH_DATA_PATH}/lib/ceph:/var/lib/ceph
+      - ${CEPH_DATA_PATH}/osd1:/var/lib/ceph/osd/osd1
+    networks:
+      ceph-net:
+        ipv4_address: ${CEPH_OSD_IP}
+    depends_on:
+      - ceph-mon
+    mem_limit: 12g
+
+  ceph-osd2:
+    image: quay.io/ceph/daemon:latest-quincy
+    container_name: ceph-osd2
+    hostname: osd2
+    privileged: true
+    restart: unless-stopped
+    environment:
+      CEPH_DAEMON: OSD_DIRECTORY_SINGLE
+      OSD_DIRECTORY: /var/lib/ceph/osd/osd2
+    volumes:
+      - ${CEPH_DATA_PATH}/etc/ceph:/etc/ceph
+      - ${CEPH_DATA_PATH}/lib/ceph:/var/lib/ceph
+      - ${CEPH_DATA_PATH}/osd2:/var/lib/ceph/osd/osd2
+    networks:
+      ceph-net:
+        ipv4_address: ${CEPH_OSD2_IP}
+    depends_on:
+      - ceph-mon
+    mem_limit: 12g
+
+  ceph-rgw:
+    image: quay.io/ceph/daemon:latest-quincy
+    container_name: ceph-rgw
+    hostname: rgw
+    privileged: true
+    restart: unless-stopped
+    environment:
+      CEPH_DAEMON: RGW
+      RGW_NAME: rgw1
+      RGW_CIVETWEB_PORT: ${RGW_PORT}
+    volumes:
+      - ${CEPH_DATA_PATH}/etc/ceph:/etc/ceph
+      - ${CEPH_DATA_PATH}/lib/ceph:/var/lib/ceph
+    ports:
+      - "${RGW_PORT}:${RGW_PORT}"
+    networks:
+      ceph-net:
+        ipv4_address: ${CEPH_RGW_IP}
+    depends_on:
+      - ceph-mon
+      - ceph-mgr
+      - ceph-osd1
+      - ceph-osd2
+    mem_limit: 4g
