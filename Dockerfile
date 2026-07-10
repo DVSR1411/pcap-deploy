@@ -47,7 +47,7 @@ EXPOSE 5000
 ENV FLASK_APP=app.py \
     FLASK_ENV=production \
     PYTHONUNBUFFERED=1 \
-    ES_HOST=http://elasticsearch:9200
+    ES_HOST=http://192.168.10.200:9200
 
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \

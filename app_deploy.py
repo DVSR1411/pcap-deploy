@@ -11,6 +11,7 @@ from elastic import get_es
 from dotenv import load_dotenv
 import elastic
 from datetime import datetime, timezone
+from keycloak import KeycloakOpenID
 
 load_dotenv()
 
@@ -41,6 +42,37 @@ basedir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__)
 CORS(app)
 app.config['ZEEK_LOGS_FOLDER'] = os.path.join(basedir, 'zeek_logs')
+
+# ============= KEYCLOAK =============
+_keycloak = KeycloakOpenID(
+    server_url=os.getenv('KEYCLOAK_URL'),
+    client_id=os.getenv('KEYCLOAK_CLIENT_ID'),
+    realm_name=os.getenv('KEYCLOAK_REALM'),
+    client_secret_key=os.getenv('KEYCLOAK_CLIENT_SECRET'),
+)
+
+def require_role(*roles):
+    def decorator(f):
+        @wraps(f)
+        def wrapper(*args, **kwargs):
+            auth_header = request.headers.get('Authorization', '')
+            token = auth_header[7:].strip() if auth_header.lower().startswith('bearer ') else auth_header.strip()
+            if not token:
+                return api_response(data=None, success=False, error='Missing token'), 401
+            try:
+                token_info = _keycloak.introspect(token)
+                if not token_info.get('active'):
+                    print(f'[Auth] Token introspection returned inactive. token_info={token_info}')
+                    return api_response(data=None, success=False, error='Invalid or expired token'), 401
+                user_roles = token_info.get('realm_access', {}).get('roles', [])
+                if not any(r in user_roles for r in roles):
+                    return api_response(data=None, success=False, error='Insufficient permissions'), 403
+            except Exception as e:
+                print(f'[Auth] Introspection exception: {type(e).__name__}: {e}')
+                return api_response(data=None, success=False, error=f'Auth error: {str(e)}'), 401
+            return f(*args, **kwargs)
+        return wrapper
+    return decorator
 
 # Ensure index exists
 es = get_es()
@@ -139,6 +171,7 @@ def health():
 
 # ============= IP INTELLIGENCE PROGRESS =============
 @app.route('/api/ip-intelligence/progress', methods=['GET'])
+@require_role('admin')
 def ip_intelligence_progress():
     try:
         total_unique = len(scroll_all_external_ips(es, elastic.PCAP_IPS_INDEX))
@@ -157,6 +190,7 @@ def ip_intelligence_progress():
 
 # ============= TIMELINE / TIME SERIES =============
 @app.route('/api/pcaps/<pcap_id>/timeline', methods=['GET'])
+@require_role('admin')
 def get_time_series(pcap_id):
     try:
         data = elastic.get_time_series(pcap_id)
@@ -175,6 +209,7 @@ def get_time_series(pcap_id):
 
 # ============= STATS =============
 @app.route('/api/stats', methods=['GET'])
+@require_role('admin')
 def get_stats():
     try:
         requested_pcap_id = request.args.get('pcap_id') or None
@@ -192,6 +227,7 @@ def get_stats():
 
 # ============= RECENT LOGS =============
 @app.route('/api/recent-logs/<log_type>', methods=['GET'])
+@require_role('admin')
 def get_recent_logs(log_type):
     try:
         page = request.args.get('page', 1, type=int)
@@ -218,6 +254,7 @@ def get_recent_logs(log_type):
 @app.route('/api/overview', methods=['GET'])
 @app.route('/api/dashboard/overview', methods=['GET'])
 @app.route('/api/pcaps/<pcap_id>/summary', methods=['GET'])
+@require_role('admin')
 def get_overview(pcap_id=None):
     try:
         scoped_pcap_id = pcap_id or request.args.get('pcap_id')
@@ -236,6 +273,7 @@ def get_overview(pcap_id=None):
 # ============= INSIGHTS =============
 @app.route('/api/insights', methods=['GET'])
 @app.route('/api/pcaps/<pcap_id>/insights', methods=['GET'])
+@require_role('admin')
 def get_insights(pcap_id=None):
     try:
         scoped_pcap_id = pcap_id or request.args.get('pcap_id')
@@ -298,11 +336,13 @@ def get_insights(pcap_id=None):
 
 # ============= LEGACY ROUTES =============
 @app.route('/api/pcap/<pcap_id>', methods=['GET'])
+@require_role('admin')
 def get_pcap_analysis(pcap_id):
     return get_overview(pcap_id=pcap_id)
 
 
 @app.route('/api/pcap/latest', methods=['GET'])
+@require_role('admin')
 def get_latest_pcap_analysis():
     try:
         data = elastic.get_latest_dashboard_document()
@@ -318,6 +358,7 @@ def get_latest_pcap_analysis():
 # ============= CONNECTIONS =============
 @app.route('/api/pcaps/<pcap_id>/connections', methods=['GET'])
 @app.route('/api/pcap/<pcap_id>/connections', methods=['GET'])
+@require_role('admin')
 def get_pcap_connections(pcap_id):
     try:
         page     = request.args.get('page', 1, type=int)
@@ -340,9 +381,13 @@ def get_pcap_connections(pcap_id):
 
 
 @app.route('/api/pcaps/<pcap_id>/connections/export', methods=['GET'])
+@require_role('admin')
 def export_pcap_connections(pcap_id):
     import csv
     import io
+    import shutil
+    import subprocess
+    import tempfile
     from zeek_parser import parse_zeek_log, enrich_conn_state
 
     log_path = os.path.join(app.config['ZEEK_LOGS_FOLDER'], pcap_id, 'conn.log')
@@ -350,41 +395,59 @@ def export_pcap_connections(pcap_id):
         return api_response(data=None, success=False, error='conn.log not found for this pcap'), 404
 
     logs = parse_zeek_log(log_path)
-
     fieldnames = ['Timestamp', 'Source IP', 'Dest IP', 'Port', 'Protocol', 'Duration', 'Service', 'Conn_state_short', 'Conn_state_long', 'Bytes']
 
-    output = io.StringIO()
-    writer = csv.DictWriter(output, fieldnames=fieldnames)
+    csv_buf = io.StringIO()
+    writer = csv.DictWriter(csv_buf, fieldnames=fieldnames)
     writer.writeheader()
-
     for row in logs:
         enrich_conn_state(row)
         orig = row.get('orig_bytes') or 0
         resp = row.get('resp_bytes') or 0
         writer.writerow({
-            'Timestamp':       datetime.fromtimestamp(float(row.get('ts')), timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
-            'Source IP':       row.get('id.orig_h'),
-            'Dest IP':         row.get('id.resp_h'),
-            'Port':            row.get('id.resp_p'),
-            'Protocol':        row.get('proto'),
-            'Duration':        row.get('duration'),
-            'Service':         row.get('service'),
+            'Timestamp':        datetime.fromtimestamp(float(row.get('ts')), timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+            'Source IP':        row.get('id.orig_h'),
+            'Dest IP':          row.get('id.resp_h'),
+            'Port':             row.get('id.resp_p'),
+            'Protocol':         row.get('proto'),
+            'Duration':         row.get('duration'),
+            'Service':          row.get('service'),
             'Conn_state_short': row.get('conn_state'),
             'Conn_state_long':  row.get('conn_state_desc'),
-            'Bytes':           (orig + resp) if (orig or resp) else None,
+            'Bytes':            (orig + resp) if (orig or resp) else None,
         })
 
-    output.seek(0)
+    zip_buf = io.BytesIO()
+    with tempfile.TemporaryDirectory() as tmpdir:
+        csv_path = os.path.join(tmpdir, f'{pcap_id}_connections.csv')
+        zip_path = os.path.join(tmpdir, f'{pcap_id}_connections.zip')
+
+        with open(csv_path, 'w', encoding='utf-8', newline='') as csv_file:
+            csv_file.write(csv_buf.getvalue())
+
+        subprocess.run(
+            ['zip', '-j', '-P', f'admin1@{pcap_id}', zip_path, csv_path],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+
+        with open(zip_path, 'rb') as zip_file:
+            zip_buf.write(zip_file.read())
+
+    zip_buf.seek(0)
+
     return send_file(
-        io.BytesIO(output.getvalue().encode('utf-8')),
-        mimetype='text/csv',
+        zip_buf,
+        mimetype='application/zip',
         as_attachment=True,
-        download_name=f'{pcap_id}_connections.csv'
+        download_name=f'{pcap_id}_connections.zip'
     )
 
 
 # ============= FILES =============
 @app.route('/api/pcap/<pcap_id>/files', methods=['GET'])
+@require_role('admin')
 def get_pcap_files(pcap_id):
     try:
         data = elastic.get_pcap_files(pcap_id)
@@ -395,6 +458,7 @@ def get_pcap_files(pcap_id):
 
 # ============= PCAP LIST =============
 @app.route('/api/pcap/all', methods=['GET'])
+@require_role('admin')
 def get_all_pcap_analyses():
     try:
         res = es.search(
@@ -414,6 +478,7 @@ def get_all_pcap_analyses():
 
 # ============= GEO REPORT =============
 @app.route('/api/reports/geo', methods=['GET'])
+@require_role('admin', 'user')
 def get_geo_report():
     try:
         pcap_id = request.args.get('pcap_id')
@@ -429,6 +494,7 @@ def get_geo_report():
 
 # ============= REPORT DETAILS =============
 @app.route('/api/reports/details/<report_type>', methods=['GET'])
+@require_role('admin', 'user')
 def get_report_type_list(report_type):
     try:
         data = elastic.get_geo_aggregation()
@@ -443,6 +509,7 @@ def get_report_type_list(report_type):
 
 @app.route('/api/reports/details/<report_type>/<report_value>', methods=['GET'])
 @app.route('/api/reports/details/<report_type>/<path:report_value>', methods=['GET'])
+@require_role('admin', 'user')
 def get_report_details_path(report_type, report_value):
     try:
         data = elastic.get_report_details(report_type, report_value)
@@ -457,6 +524,7 @@ def get_report_details_path(report_type, report_value):
 
 @app.route('/api/reports/<report_type>/<report_value>', methods=['GET'])
 @app.route('/api/reports/<report_type>/<path:report_value>', methods=['GET'])
+@require_role('admin', 'user')
 def get_global_report_details(report_type, report_value):
     try:
         data = elastic.get_report_details(report_type, report_value)
@@ -471,6 +539,7 @@ def get_global_report_details(report_type, report_value):
 
 @app.route('/api/reports/<pcap_id>/<report_type>/<report_value>', methods=['GET'])
 @app.route('/api/reports/<pcap_id>/<report_type>/<path:report_value>', methods=['GET'])
+@require_role('admin', 'user')
 def get_pcap_report_details(pcap_id, report_type, report_value):
     try:
         data = elastic.get_pcap_report_details(pcap_id, report_type, report_value)
@@ -486,6 +555,7 @@ def get_pcap_report_details(pcap_id, report_type, report_value):
 
 # ============= GLOBAL STATS =============
 @app.route('/api/stats/global', methods=['GET'])
+@require_role('admin')
 def get_global_stats():
     try:
         data = elastic.get_global_aggregation()
@@ -497,6 +567,7 @@ def get_global_stats():
 # ============= PCAP LIBRARY =============
 @app.route('/api/pcaps', methods=['GET'])
 @app.route('/api/pcaps/<int:sinkhole_id>', methods=['GET'])
+@require_role('admin','user')
 def get_pcaps(sinkhole_id=1):
     try:
         search = request.args.get('search', '', type=str).lower()
@@ -557,6 +628,7 @@ def get_pcaps(sinkhole_id=1):
 
 
 @app.route('/api/pcaps/set/<int:sinkhole_id>', methods=['GET'])
+@require_role('admin','user')
 def get_pcaps_set(sinkhole_id):
     """Alias for /api/pcaps — sinkhole_id is ignored, all pcaps come from ES."""
     return get_pcaps(sinkhole_id=sinkhole_id)
@@ -564,6 +636,7 @@ def get_pcaps_set(sinkhole_id):
 
 # ============= MAP =============
 @app.route('/api/map', methods=['GET'])
+@require_role('admin')
 def get_map_data():
     try:
         pcap_id = request.args.get('pcap_id')
@@ -579,6 +652,7 @@ def get_map_data():
 
 
 @app.route('/api/map/external-ips', methods=['GET'])
+@require_role('admin')
 def get_global_map_data():
     try:
         country_data, country_packets, country_captures = scroll_country_aggregation(es, elastic.PCAP_IPS_INDEX)
@@ -592,6 +666,7 @@ def get_global_map_data():
 
 
 @app.route('/api/map/external-ips/export', methods=['GET'])
+@require_role('admin')
 def export_external_ips():
     try:
         from aggregations import get_all_external_ips
@@ -605,6 +680,7 @@ def export_external_ips():
 
 # ============= IP SCAN =============
 @app.route('/api/ip/scan/<ip_address>', methods=['GET'])
+@require_role('admin')
 def scan_ip_details(ip_address):
     try:
         data = elastic.get_ip_scan(ip_address)
@@ -636,6 +712,7 @@ def scan_ip_details(ip_address):
 
 # ============= FEEDBACK =============
 @app.route('/api/feedback', methods=['POST'])
+@require_role('admin', 'user')
 def submit_feedback():
     name         = (request.form.get('name') or '').strip()
     email        = (request.form.get('email') or '').strip()
@@ -645,8 +722,17 @@ def submit_feedback():
     if not name or not email or not message:
         return api_response(data=None, success=False, error='name, email and message are required'), 400
 
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header[7:].strip() if auth_header.lower().startswith('bearer ') else auth_header.strip()
     try:
-        elastic.index_feedback(name, email, organisation, message)
+        token_info = _keycloak.introspect(token)
+        user_roles = token_info.get('realm_access', {}).get('roles', [])
+        role = 'admin' if 'admin' in user_roles else 'user'
+    except Exception:
+        role = 'user'
+
+    try:
+        elastic.index_feedback(name, email, organisation, message, role)
     except Exception as e:
         return api_response(data=None, success=False, error=str(e)), 500
 
@@ -654,6 +740,7 @@ def submit_feedback():
 
 
 @app.route('/api/feedback', methods=['GET'])
+@require_role('admin')
 def get_feedback():
     try:
         res = es.search(
@@ -664,17 +751,18 @@ def get_feedback():
                 "size": 10000,
             }
         )
-        data = [hit["_source"] for hit in res["hits"]["hits"]]
+        data = [{**hit["_source"], "id": hit["_id"]} for hit in res["hits"]["hits"]]
         return api_response(data=data)
     except Exception as e:
         return api_response(data=None, success=False, error=str(e)), 500
 
 
-@app.route('/api/feedback/<name>', methods=['DELETE'])
-def delete_feedback(name):
+@app.route('/api/feedback/<feedback_id>', methods=['DELETE'])
+@require_role('admin')
+def delete_feedback(feedback_id):
     try:
-        es.delete(index=elastic.FEEDBACK_INDEX, id=name)
-        return api_response(data={'message': f'Feedback from {name} deleted successfully'})
+        es.delete(index=elastic.FEEDBACK_INDEX, id=feedback_id)
+        return api_response(data={'message': f'Feedback {feedback_id} deleted successfully'})
     except Exception as e:
         return api_response(data=None, success=False, error=str(e)), 500
 
@@ -699,6 +787,7 @@ def require_api_key(f):
     return decorated
 
 @app.route('/api/ceph/buckets', methods=['GET'])
+@require_role('admin')
 def ceph_list_buckets():
     try:
         res = _s3().list_buckets()
@@ -708,6 +797,7 @@ def ceph_list_buckets():
         return api_response(data=None, success=False, error=str(e)), 500
 
 @app.route('/api/ceph/buckets', methods=['POST'])
+@require_role('admin')
 def ceph_create_bucket():
     body = request.get_json() or {}
     bucket = body.get('bucket')
@@ -720,6 +810,7 @@ def ceph_create_bucket():
         return api_response(data=None, success=False, error=str(e)), 500
 
 @app.route('/api/ceph/buckets/<bucket>', methods=['DELETE'])
+@require_role('admin')
 def ceph_delete_bucket(bucket):
     try:
         s3 = _s3()
@@ -733,6 +824,7 @@ def ceph_delete_bucket(bucket):
         return api_response(data=None, success=False, error=str(e)), 500
 
 @app.route('/api/ceph/buckets/<bucket>/objects', methods=['GET'])
+@require_role('admin')
 def ceph_list_objects(bucket):
     try:
         prefix = request.args.get('prefix', '')
@@ -746,6 +838,7 @@ def ceph_list_objects(bucket):
         return api_response(data=None, success=False, error=str(e)), 500
 
 @app.route('/api/ceph/buckets/<bucket>/objects/<path:key>', methods=['PUT'])
+@require_role('admin')
 def ceph_upload_object(bucket, key):
     if 'file' not in request.files:
         return api_response(data=None, success=False, error='file is required'), 400
@@ -757,6 +850,7 @@ def ceph_upload_object(bucket, key):
         return api_response(data=None, success=False, error=str(e)), 500
 
 @app.route('/api/ceph/buckets/<bucket>/objects/<path:key>', methods=['GET'])
+@require_role('admin')
 def ceph_download_object(bucket, key):
     try:
         res = _s3().get_object(Bucket=bucket, Key=key)
@@ -769,6 +863,7 @@ def ceph_download_object(bucket, key):
         return api_response(data=None, success=False, error=str(e)), 500
 
 @app.route('/api/ceph/buckets/<bucket>/objects/<path:key>', methods=['DELETE'])
+@require_role('admin')
 def ceph_delete_object(bucket, key):
     try:
         _s3().delete_object(Bucket=bucket, Key=key)

@@ -1,57 +1,61 @@
 version: "3.8"
 services:
-  elasticsearch:
-    image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
-    container_name: elasticsearch
-    environment:
-      - discovery.type=single-node
-      - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
-      - xpack.security.enabled=true
-      - xpack.security.enrollment.enabled=false
-      - xpack.security.http.ssl.enabled=false
-      - xpack.security.transport.ssl.enabled=false
-      - xpack.monitoring.collection.enabled=false
-      - xpack.ml.enabled=false
-      - xpack.watcher.enabled=false
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g
-      - bootstrap.memory_lock=true
-      - indices.memory.index_buffer_size=10%
-      - thread_pool.search.queue_size=1000
-      - thread_pool.write.queue_size=1000
-    mem_limit: 2g
-    memswap_limit: 3g
-    mem_swappiness: 0
-    ulimits:
-      memlock:
-        soft: -1
-        hard: -1
-      nofile:
-        soft: 65536
-        hard: 65536
-    ports:
-      - "9200:9200"
-    volumes:
-      - elasticsearch-data:/usr/share/elasticsearch/data
-    networks:
-      - elastic
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
+  # elasticsearch:
+  #   image: docker.elastic.co/elasticsearch/elasticsearch:8.13.0
+  #   container_name: elasticsearch
+  #   environment:
+  #     - discovery.type=single-node
+  #     - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+  #     - xpack.security.enabled=true
+  #     - xpack.security.enrollment.enabled=false
+  #     - xpack.security.http.ssl.enabled=false
+  #     - xpack.security.transport.ssl.enabled=false
+  #     - xpack.monitoring.collection.enabled=false
+  #     - xpack.ml.enabled=false
+  #     - xpack.watcher.enabled=false
+  #     - ES_JAVA_OPTS=-Xms1g -Xmx1g
+  #     - bootstrap.memory_lock=true
+  #     - indices.memory.index_buffer_size=10%
+  #     - thread_pool.search.queue_size=1000
+  #     - thread_pool.write.queue_size=1000
+  #   mem_limit: 2g
+  #   memswap_limit: 3g
+  #   mem_swappiness: 0
+  #   ulimits:
+  #     memlock:
+  #       soft: -1
+  #       hard: -1
+  #     nofile:
+  #       soft: 65536
+  #       hard: 65536
+  #   ports:
+  #     - "9200:9200"
+  #   volumes:
+  #     - elasticsearch-data:/usr/share/elasticsearch/data
+  #   networks:
+  #     - elastic
+  #   restart: unless-stopped
+  #   logging:
+  #     driver: "json-file"
+  #     options:
+  #       max-size: "10m"
+  #       max-file: "3"
 
   pcap-api:
-    image: pcap-api:v4
+    image: pcap-api:v1
     container_name: pcap-api
     environment:
-      - ES_HOST=http://elasticsearch:9200
+      - ES_HOST=http://192.168.10.200:9200
       - ELASTIC_USER=elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
       - CEPH_RGW_ENDPOINT=http://ceph-rgw:7480
       - RGW_ACCESS_KEY=${RGW_ACCESS_KEY}
       - RGW_SECRET_KEY=${RGW_SECRET_KEY}
       - RGW_REGION=${RGW_REGION:-us-east-1}
+      - KEYCLOAK_URL=http://192.168.10.62:8080/
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-cdac}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}
+      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
     mem_limit: 512m
     mem_reservation: 256m
     cpus: "0.5"
@@ -59,18 +63,21 @@ services:
       - "5000:5000"
     volumes:
       - ${ZEEK_LOGS_PATH:-./zeek_logs}:/app/zeek_logs:ro
-    depends_on:
-      - elasticsearch
+    # depends_on:
+    #   - elasticsearch
     networks:
-      - elastic
+      # - elastic
+      - sinkhole-u_keycloak_network
     restart: unless-stopped
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
         max-file: "3"
-volumes:
-  elasticsearch-data:
+# volumes:
+#   elasticsearch-data:
 networks:
-  elastic:
-    driver: bridge
+  # elastic:
+  #   driver: bridge
+  sinkhole-u_keycloak_network:
+    external: true

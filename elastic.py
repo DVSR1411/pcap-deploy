@@ -916,6 +916,7 @@ def create_feedback_index():
                 "email":        {"type": "keyword"},
                 "organisation": {"type": "keyword"},
                 "message":      {"type": "text"},
+                "role":         {"type": "keyword"},
                 "submitted_at": {"type": "date"},
             }
         }
@@ -923,7 +924,7 @@ def create_feedback_index():
     print("\u2713 Created Index: feedback")
 
 
-def index_feedback(name, email, organisation, message):
+def index_feedback(name, email, organisation, message, role="user"):
     es = get_es()
     if not es:
         return None
@@ -933,9 +934,10 @@ def index_feedback(name, email, organisation, message):
         "email":        email,
         "organisation": organisation,
         "message":      message,
+        "role":         role,
         "submitted_at": datetime.now(timezone.utc).isoformat(),
     }
-    return es.index(index=FEEDBACK_INDEX, id=name, body=doc)
+    return es.index(index=FEEDBACK_INDEX, document=doc)
 
 
 # ---------------- LEGACY COMPAT ----------------
