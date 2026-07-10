@@ -580,7 +580,7 @@ def get_pcaps(sinkhole_id=1):
             index=elastic.PCAP_METADATA_INDEX,
             body={
                 "query": query,
-                "_source": ["pcap_id", "pcap_filename", "file_name", "file_size", "total_packets", "duration_seconds"],
+                "_source": ["pcap_id", "pcap_filename", "file_name", "file_size", "total_packets", "duration_seconds", "start_time_utc", "end_time_utc"],
                 "size": 10000,
                 "sort": [{"analysis_timestamp": {"order": "desc"}}]
             }
@@ -612,7 +612,9 @@ def get_pcaps(sinkhole_id=1):
                 "size": src.get("file_size") or 0,
                 "packets": src.get("total_packets") or 0,
                 "duration": src.get("duration_seconds") or 0,
-                "ip_count": ip_count_map.get(pcap_id, 0)
+                "ip_count": ip_count_map.get(pcap_id, 0),
+                "start_time": src.get("start_time_utc"),
+                "end_time": src.get("end_time_utc"),
             })
 
         total = res["hits"]["total"]["value"] if isinstance(res["hits"]["total"], dict) else res["hits"]["total"]
