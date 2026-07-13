@@ -668,7 +668,7 @@ def get_report_details(report_type, value):
     if '%' in value:
         value = urllib.parse.unquote(value)
 
-    field_map = {'isp': 'geo.isp', 'city': 'geo.city', 'country': 'geo.country'}
+    field_map = {'isp': 'geo.isp', 'country': 'geo.country'}
     field = field_map.get(report_type.lower())
     if not field: return []
 
@@ -678,8 +678,7 @@ def get_report_details(report_type, value):
             "query": {"bool": {"should": [
                 {"term": {f"{field}.keyword": value}},
                 {"match_phrase": {field: value}}
-            ], "minimum_should_match": 1}},
-            "_source": ["ip", "geo", "asn", "pcap_id"]
+            ], "minimum_should_match": 1}}
         })
         print(f"DEBUG: Query {field}='{value}', hits={res['hits']['total']['value']}")
         matched_ips = build_matched_ips(res["hits"]["hits"])
@@ -700,8 +699,8 @@ def get_report_details(report_type, value):
 
 def get_pcap_report_details(pcap_id, report_type, value):
     """
-    Returns a detailed list of IPs for a specific ISP, City, or Country within a single PCAP.
-    Uses pcap-ips index and returns same structure as get_report_details but scoped to one PCAP.
+    Returns IP intelligence for IPs in a PCAP filtered by isp/country.
+    Gets IP list from pcap-ips, then joins with ip-intelligence via mget.
     """
     import urllib.parse
     from aggregations import filter_ips_by_field, sort_ip_rows
@@ -712,12 +711,37 @@ def get_pcap_report_details(pcap_id, report_type, value):
     if '%' in value:
         value = urllib.parse.unquote(value)
 
-    field = {'isp': 'isp', 'city': 'city', 'country': 'country'}.get(report_type.lower())
+    field = {'isp': 'isp', 'country': 'country'}.get(report_type.lower())
     if not field: return []
 
     try:
         external_ips = es.get(index=PCAP_IPS_INDEX, id=pcap_id)["_source"].get("external_ips", [])
-        return sort_ip_rows(filter_ips_by_field(external_ips, field, value))
+        filtered = filter_ips_by_field(external_ips, field, value)
+        if not filtered:
+            return []
+
+        # Build packet_count lookup from pcap-ips
+        packet_map = {e['ip']: e.get('packet_count', 0) for e in filtered if e.get('ip')}
+
+        # Join with ip-intelligence via mget
+        intel_map = {}
+        mget_res = es.mget(index=IP_INTEL_INDEX, body={"ids": list(packet_map.keys())})
+        for doc in mget_res['docs']:
+            if doc.get('found'):
+                src = doc['_source']
+                intel_map[src.get('ip')] = src
+
+        # Merge: prefer intel record, fall back to pcap-ips data, always attach packet_count
+        rows = []
+        for entry in filtered:
+            ip = entry.get('ip')
+            if not ip:
+                continue
+            row = dict(intel_map.get(ip, entry))
+            row['packet_count'] = packet_map.get(ip, 0)
+            rows.append(row)
+
+        return sort_ip_rows(rows)
     except Exception as e:
         print(f"get_pcap_report_details error: {e}")
         return []
@@ -1027,30 +1051,35 @@ def _recent_log_total(es, pcap_id):
     return int(res.get("aggregations", {}).get("total", {}).get("value", 0) or 0)
 
 
-def _format_recent_log(log):
-    conn_state_map = {
-        'S0': 'SYN sent, no response received',
-        'S1': 'Connection established, not closed',
-        'SF': 'Normal connection setup and proper closure',
-        'REJ': 'Connection attempt rejected',
-        'S2': 'Connection established, initiator tried to close, no responder reply',
-        'S3': 'Connection established, responder tried to close, no initiator reply',
-        'RSTO': 'Initiator reset (aborted) the connection',
-        'RSTR': 'Responder reset the connection',
-        'RSTOS0': 'Initiator sent SYN then RST, no SYN-ACK seen',
-        'RSTRH': 'Responder sent SYN-ACK then RST, no SYN from initiator seen',
-        'SH': 'Initiator sent SYN then FIN, connection half-open',
-        'SHR': 'Responder sent SYN-ACK then FIN, no SYN from initiator',
-        'OTH': 'Midstream traffic only, no SYN observed',
-    }
+_CONN_STATE_MAP = {
+    'S0': 'SYN sent, no response received',
+    'S1': 'Connection established, not closed',
+    'SF': 'Normal connection setup and proper closure',
+    'REJ': 'Connection attempt rejected',
+    'S2': 'Connection established, initiator tried to close, no responder reply',
+    'S3': 'Connection established, responder tried to close, no initiator reply',
+    'RSTO': 'Initiator reset (aborted) the connection',
+    'RSTR': 'Responder reset the connection',
+    'RSTOS0': 'Initiator sent SYN then RST, no SYN-ACK seen',
+    'RSTRH': 'Responder sent SYN-ACK then RST, no SYN from initiator seen',
+    'SH': 'Initiator sent SYN then FIN, connection half-open',
+    'SHR': 'Responder sent SYN-ACK then FIN, no SYN from initiator',
+    'OTH': 'Midstream traffic only, no SYN observed',
+}
 
+
+def _format_recent_log(log):
     formatted = {}
     for key, value in log.items():
         if key == 'ts':
+            # ts is now an ISO string (e.g. "2023-12-07T15:11:56.804497+00:00")
             try:
-                formatted['timestamp'] = datetime.fromtimestamp(float(value), timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                formatted['timestamp'] = datetime.fromisoformat(str(value)).strftime('%Y-%m-%d %H:%M:%S')
             except Exception:
-                formatted['timestamp'] = value
+                try:
+                    formatted['timestamp'] = datetime.fromtimestamp(float(value), timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+                except Exception:
+                    formatted['timestamp'] = value
         elif key in ('id.orig_h', 'orig_h'):
             formatted['src_ip'] = value
         elif key in ('id.resp_h', 'resp_h'):
@@ -1058,7 +1087,8 @@ def _format_recent_log(log):
         elif key in ('id.resp_p', 'resp_p'):
             formatted['resp_port'] = value
         elif key == 'conn_state':
-            formatted['conn_state_desc'] = conn_state_map.get(str(value).upper(), value)
+            formatted['conn_state'] = value
+            formatted['conn_state_desc'] = _CONN_STATE_MAP.get(str(value).upper(), value)
         elif key == 'duration':
             try:
                 formatted[key] = f"{float(value):.6f}"
@@ -1078,35 +1108,17 @@ def _load_recent_logs_from_zeek_conn(es, pcap_id, start, per_page):
         all_conns = []
         for hit in res["hits"]["hits"]:
             all_conns.extend(hit["_source"].get("connections") or [])
-        all_conns.sort(key=lambda row: float(row.get("ts") or 0), reverse=True)
+        all_conns.sort(key=lambda row: str(row.get("ts") or ""), reverse=True)
 
-    page_logs = all_conns[start:start + per_page]
-    return [_format_recent_log(row) for row in page_logs]
-
-
-def _load_recent_logs_from_disk(zeek_logs_folder, pcap_id, start, per_page):
-    if not zeek_logs_folder or not pcap_id:
-        return []
-
-    log_path = os.path.join(zeek_logs_folder, pcap_id, "conn.log")
-    if not os.path.exists(log_path):
-        return []
-
-    from zeek_parser import parse_zeek_log
-
-    all_logs = parse_zeek_log(log_path)
-    all_logs.sort(key=lambda row: float(row.get('ts') or 0), reverse=True)
-    page_logs = all_logs[start:start + per_page]
-    return [_format_recent_log(row) for row in page_logs]
+    return [_format_recent_log(row) for row in all_conns[start:start + per_page]]
 
 
-def get_recent_logs_from_es(pcap_id=None, per_page=50, page=1, zeek_logs_folder=None):
-    """Paginate connections. First 500 from zeek-conn embedded array, beyond that from conn.log on disk."""
+def get_recent_logs_from_es(pcap_id=None, per_page=50, page=1):
+    """Paginate connections from zeek-conn embedded array in Elasticsearch."""
     es = get_es()
     if not es:
         return {"logs": [], "total": 0, "page": page, "per_page": per_page, "total_pages": 0}
 
-    ES_CAP = 500
     start = (page - 1) * per_page
 
     try:
@@ -1115,12 +1127,7 @@ def get_recent_logs_from_es(pcap_id=None, per_page=50, page=1, zeek_logs_folder=
         total = 0
 
     total_pages = math.ceil(total / per_page) if per_page > 0 else 0
-
-    if start < ES_CAP:
-        logs = _load_recent_logs_from_zeek_conn(es, pcap_id, start, per_page)
-        return {"logs": logs, "total": total, "page": page, "per_page": per_page, "total_pages": total_pages}
-
-    logs = _load_recent_logs_from_disk(zeek_logs_folder, pcap_id, start, per_page)
+    logs = _load_recent_logs_from_zeek_conn(es, pcap_id, start, per_page)
     return {"logs": logs, "total": total, "page": page, "per_page": per_page, "total_pages": total_pages}
 
 

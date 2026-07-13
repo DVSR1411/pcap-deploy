@@ -339,21 +339,13 @@ def aggregate_geo_from_es(es_client, ips_index):
 
 
 def build_matched_ips(hits):
-    """Build matched_ips dict from ip-intelligence search hits."""
+    """Build matched_ips dict from ip-intelligence search hits, preserving full source."""
     matched_ips = {}
     for h in hits:
         src = h["_source"]
-        geo = src.get("geo") or {}
         ip = src.get("ip")
-        matched_ips[ip] = {
-            "ip":        ip,
-            "packets":   0,
-            "isp":       geo.get("isp") or "Unknown",
-            "city":      geo.get("city") or "Unknown",
-            "country":   geo.get("country") or "Unknown",
-            "latitude":  geo.get("latitude"),
-            "longitude": geo.get("longitude"),
-        }
+        matched_ips[ip] = dict(src)
+        matched_ips[ip]["packets"] = 0
     return matched_ips
 
 

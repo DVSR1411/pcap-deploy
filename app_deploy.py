@@ -15,21 +15,8 @@ from keycloak import KeycloakOpenID
 
 load_dotenv()
 
-try:
-    from zeek_parser import (
-        get_internal_tcp_udp_ip_aggregation_from_conn_log,
-        get_internal_tcp_udp_ip_aggregation_from_conn_logs,
-        get_site_status_context,
-    )
-except ImportError:
-    def get_internal_tcp_udp_ip_aggregation_from_conn_log(_):
-        return {"ips": [], "count": 0}
-
-    def get_internal_tcp_udp_ip_aggregation_from_conn_logs(_):
-        return {"ips": [], "count": 0}
-
-    def get_site_status_context():
-        return {}
+def get_site_status_context():
+    return {}
 
 from helpers import (
     scroll_all_external_ips, rebin_time_series, normalise_labels,
@@ -41,7 +28,6 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 basedir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__)
 CORS(app)
-app.config['ZEEK_LOGS_FOLDER'] = os.path.join(basedir, 'zeek_logs')
 
 # ============= KEYCLOAK =============
 _keycloak = KeycloakOpenID(
@@ -367,7 +353,6 @@ def get_pcap_connections(pcap_id):
             page=page,
             per_page=max(1, min(per_page, 100)),
             pcap_id=pcap_id,
-            zeek_logs_folder=app.config['ZEEK_LOGS_FOLDER']
         )
         return api_response(
             data=result.get('logs', []),
@@ -384,65 +369,63 @@ def get_pcap_connections(pcap_id):
 @require_role('admin')
 def export_pcap_connections(pcap_id):
     import csv
-    import io
-    import shutil
     import subprocess
     import tempfile
-    from zeek_parser import parse_zeek_log, enrich_conn_state
+    from elastic import _CONN_STATE_MAP
 
-    log_path = os.path.join(app.config['ZEEK_LOGS_FOLDER'], pcap_id, 'conn.log')
-    if not os.path.isfile(log_path):
-        return api_response(data=None, success=False, error='conn.log not found for this pcap'), 404
+    try:
+        doc = es.get(index=elastic.ZEEK_CONN_INDEX, id=pcap_id)["_source"]
+    except Exception:
+        return api_response(data=None, success=False, error='No connection data found for this pcap'), 404
 
-    logs = parse_zeek_log(log_path)
+    logs = doc.get('connections', [])
+    if not logs:
+        return api_response(data=None, success=False, error='No connections found for this pcap'), 404
+
     fieldnames = ['Timestamp', 'Source IP', 'Dest IP', 'Port', 'Protocol', 'Duration', 'Service', 'Conn_state_short', 'Conn_state_long', 'Bytes']
 
     csv_buf = io.StringIO()
     writer = csv.DictWriter(csv_buf, fieldnames=fieldnames)
     writer.writeheader()
     for row in logs:
-        enrich_conn_state(row)
+        ts = row.get('ts', '')
+        try:
+            ts_str = datetime.fromisoformat(str(ts)).strftime('%Y-%m-%d %H:%M:%S')
+        except Exception:
+            try:
+                ts_str = datetime.fromtimestamp(float(ts), timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
+            except Exception:
+                ts_str = ts
+        conn_state = row.get('conn_state')
         orig = row.get('orig_bytes') or 0
-        resp = row.get('resp_bytes') or 0
         writer.writerow({
-            'Timestamp':        datetime.fromtimestamp(float(row.get('ts')), timezone.utc).strftime('%Y-%m-%d %H:%M:%S'),
+            'Timestamp':        ts_str,
             'Source IP':        row.get('id.orig_h'),
             'Dest IP':          row.get('id.resp_h'),
             'Port':             row.get('id.resp_p'),
             'Protocol':         row.get('proto'),
             'Duration':         row.get('duration'),
             'Service':          row.get('service'),
-            'Conn_state_short': row.get('conn_state'),
-            'Conn_state_long':  row.get('conn_state_desc'),
-            'Bytes':            (orig + resp) if (orig or resp) else None,
+            'Conn_state_short': conn_state,
+            'Conn_state_long':  _CONN_STATE_MAP.get(str(conn_state).upper(), conn_state) if conn_state else None,
+            'Bytes':            orig or None,
         })
 
     zip_buf = io.BytesIO()
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_path = os.path.join(tmpdir, f'{pcap_id}_connections.csv')
         zip_path = os.path.join(tmpdir, f'{pcap_id}_connections.zip')
-
-        with open(csv_path, 'w', encoding='utf-8', newline='') as csv_file:
-            csv_file.write(csv_buf.getvalue())
-
+        with open(csv_path, 'w', encoding='utf-8', newline='') as f:
+            f.write(csv_buf.getvalue())
         subprocess.run(
             ['zip', '-j', '-P', f'admin1@{pcap_id}', zip_path, csv_path],
-            check=True,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
+            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-
-        with open(zip_path, 'rb') as zip_file:
-            zip_buf.write(zip_file.read())
-
+        with open(zip_path, 'rb') as f:
+            zip_buf.write(f.read())
     zip_buf.seek(0)
-
-    return send_file(
-        zip_buf,
-        mimetype='application/zip',
-        as_attachment=True,
-        download_name=f'{pcap_id}_connections.zip'
-    )
+    return send_file(zip_buf, mimetype='application/zip', as_attachment=True,
+                     download_name=f'{pcap_id}_connections.zip')
 
 
 # ============= FILES =============
@@ -871,6 +854,108 @@ def ceph_delete_object(bucket, key):
         _s3().delete_object(Bucket=bucket, Key=key)
         return api_response(data={'bucket': bucket, 'key': key, 'deleted': True})
     except ClientError as e:
+        return api_response(data=None, success=False, error=str(e)), 500
+
+
+# ============= PDF REPORTS =============
+def _pdf_response(pdf_bytes, filename):
+    return send_file(io.BytesIO(pdf_bytes), mimetype='application/pdf',
+                     as_attachment=True, download_name=filename)
+
+
+@app.route('/api/reports/<pcap_id>/<report_type>/<report_value>/export', methods=['GET'])
+@app.route('/api/reports/<pcap_id>/<report_type>/<path:report_value>/export', methods=['GET'])
+@require_role('admin', 'user')
+def export_pcap_report_pdf(pcap_id, report_type, report_value):
+    """PDF export of /api/reports/<pcap_id>/<report_type>/<report_value>"""
+    try:
+        import urllib.parse
+        from report_pdf import build_pdf
+        report_value = urllib.parse.unquote(report_value)
+        ip_rows = elastic.get_pcap_report_details(pcap_id, report_type, report_value)
+        pdf_bytes = build_pdf(
+            title=report_value,
+            subtitle='Report',
+            meta_pairs=[('PCAP ID', pcap_id)],
+            ip_rows=ip_rows,
+            section_title=f'IPs for {report_type.title()}: {report_value}',
+        )
+        safe = report_value.replace('/', '_').replace(' ', '_')
+        return _pdf_response(pdf_bytes, f'{pcap_id}_{report_type}_{safe}_report.pdf')
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return api_response(data=None, success=False, error=str(e)), 500
+
+
+@app.route('/api/reports/details/<report_type>/<report_value>/export', methods=['GET'])
+@app.route('/api/reports/details/<report_type>/<path:report_value>/export', methods=['GET'])
+@require_role('admin', 'user')
+def export_report_details_pdf(report_type, report_value):
+    """PDF export of /api/reports/details/<report_type>/<report_value>"""
+    try:
+        import urllib.parse
+        from report_pdf import build_pdf
+        report_value = urllib.parse.unquote(report_value)
+        ip_rows = elastic.get_report_details(report_type, report_value)
+        pdf_bytes = build_pdf(
+            title=report_value,
+            subtitle='Report',
+            meta_pairs=[],
+            ip_rows=ip_rows,
+            section_title=f'IPs for {report_type.title()}: {report_value}',
+        )
+        safe = report_value.replace('/', '_').replace(' ', '_')
+        return _pdf_response(pdf_bytes, f'{report_type}_{safe}_report.pdf')
+    except Exception as e:
+        import traceback; traceback.print_exc()
+        return api_response(data=None, success=False, error=str(e)), 500
+
+
+@app.route('/api/pcaps/<pcap_id>/export', methods=['GET'])
+@require_role('admin', 'user')
+def export_pcap_ip_intelligence_pdf(pcap_id):
+    """PDF export of full IP intelligence for a PCAP (mirrors /api/pcaps/<pcap_id>/summary)"""
+    try:
+        from report_pdf import build_pdf
+        meta = elastic.get_dashboard_document(pcap_id)
+        if not meta:
+            return api_response(data=None, success=False, error=f'No analysis found for {pcap_id}'), 404
+
+        external_ips = elastic.get_external_ips_for_pcap(pcap_id)
+        packet_map = {e['ip']: e.get('packet_count', 0) for e in external_ips if e.get('ip')}
+        ip_set = list(packet_map.keys())
+
+        intel_rows = []
+        if ip_set:
+            res = es.mget(index=elastic.IP_INTEL_INDEX, body={"ids": ip_set})
+            for doc in res['docs']:
+                if doc.get('found'):
+                    row = dict(doc['_source'])
+                    row['packet_count'] = packet_map.get(row.get('ip'), 0)
+                    intel_rows.append(row)
+        intel_rows.sort(key=lambda r: r.get('packet_count', 0), reverse=True)
+
+        filename = meta.get('pcap_filename') or meta.get('file_name') or pcap_id
+        pdf_bytes = build_pdf(
+            title=f'PCAP Report \u2014 {filename}',
+            subtitle=f'IP Intelligence \u00b7 PCAP ID: {pcap_id}',
+            meta_pairs=[
+                ('PCAP ID',       pcap_id),
+                ('Filename',      filename),
+                ('Total Packets', meta.get('total_packets')),
+                ('Duration (s)',  meta.get('duration_seconds')),
+                ('File Size',     meta.get('file_size')),
+                ('Start Time',    meta.get('start_time_utc')),
+                ('End Time',      meta.get('end_time_utc')),
+                ('External IPs',  len(external_ips)),
+                ('Intel Records', len(intel_rows)),
+            ],
+            ip_rows=intel_rows,
+            section_title='External IP Intelligence',
+        )
+        return _pdf_response(pdf_bytes, f'{pcap_id}_ip_intelligence.pdf')
+    except Exception as e:
+        import traceback; traceback.print_exc()
         return api_response(data=None, success=False, error=str(e)), 500
 
 
