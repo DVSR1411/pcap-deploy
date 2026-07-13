@@ -13,13 +13,13 @@ services:
       - xpack.monitoring.collection.enabled=false
       - xpack.ml.enabled=false
       - xpack.watcher.enabled=false
-      - ES_JAVA_OPTS=-Xms1g -Xmx1g
+      - ES_JAVA_OPTS=-Xms4g -Xmx4g
       - bootstrap.memory_lock=true
-      - indices.memory.index_buffer_size=10%
-      - thread_pool.search.queue_size=1000
-      - thread_pool.write.queue_size=1000
-    mem_limit: 2g
-    memswap_limit: 3g
+      - indices.memory.index_buffer_size=20%
+      - thread_pool.search.queue_size=2000
+      - thread_pool.write.queue_size=2000
+    mem_limit: 8g
+    memswap_limit: 8g
     mem_swappiness: 0
     ulimits:
       memlock:
@@ -41,43 +41,21 @@ services:
         max-size: "10m"
         max-file: "3"
 
-  kibana:
-    image: docker.elastic.co/kibana/kibana:8.13.0
-    container_name: kibana
-    environment:
-      - ELASTICSEARCH_HOSTS=${ES_HOST:-http://elasticsearch:9200}
-      - ELASTICSEARCH_SERVICEACCOUNTTOKEN=${KIBANA_TOKEN}
-      - xpack.security.enabled=true
-    mem_limit: 1g
-    ports:
-      - "5601:5601"
-    networks:
-      - elastic
-    restart: unless-stopped
-    logging:
-      driver: "json-file"
-      options:
-        max-size: "10m"
-        max-file: "3"
-
   pcap-api:
-    image: pcap-api:v3
+    elasticsearch:
+    image: pcap-api:latest
     container_name: pcap-api
     environment:
-      - ES_HOST=${ES_HOST:-http://elasticsearch:9200}
+      - ES_HOST=http://elasticsearch:9200
       - ELASTIC_USER=elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
       - CEPH_RGW_ENDPOINT=http://ceph-rgw:7480
       - RGW_ACCESS_KEY=${RGW_ACCESS_KEY}
       - RGW_SECRET_KEY=${RGW_SECRET_KEY}
       - RGW_REGION=${RGW_REGION:-us-east-1}
-      - KEYCLOAK_URL=${KEYCLOAK_URL:-http://keycloak:8080/}
-      - KEYCLOAK_REALM=${KEYCLOAK_REALM:-cdac}
-      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}
-      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
-    mem_limit: 512m
-    mem_reservation: 256m
-    cpus: "0.5"
+    mem_limit: 3g
+    mem_reservation: 2g
+    cpus: "1.5"
     ports:
       - "5000:5000"
     volumes:
@@ -86,7 +64,7 @@ services:
       - elasticsearch
     networks:
       - elastic
-      - sinkhole-u_keycloak_network
+      - ceph-net
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -98,5 +76,5 @@ volumes:
 networks:
   elastic:
     driver: bridge
-  sinkhole-u_keycloak_network:
+  ceph-net:
     external: true
