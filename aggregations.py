@@ -1,5 +1,103 @@
+import ipaddress
+import json
+import os
 from elastic import get_es, PCAP_METADATA_INDEX, PCAP_IPS_INDEX, IP_INTEL_INDEX
 from collections import defaultdict
+
+_CONN_LOG_FIELDS = frozenset({
+    'ts', 'id.orig_h', 'id.resp_h', 'id.resp_p',
+    'proto', 'service', 'duration', 'orig_bytes', 'conn_state'
+})
+
+_CGN = ipaddress.ip_network('100.64.0.0/10')
+
+
+def _cast_value(value, field_type):
+    if value == '-':
+        return None
+    if field_type in {'count', 'int'}:
+        try:
+            return int(value)
+        except ValueError:
+            return value
+    if field_type in {'double', 'interval'}:
+        try:
+            return float(value)
+        except ValueError:
+            return value
+    return value
+
+
+def _parse_tsv_line(line, fields, types):
+    values = line.split('\t')
+    if len(values) != len(fields):
+        return None
+    return {
+        field: _cast_value(values[i], types[i] if i < len(types) else None)
+        for i, field in enumerate(fields)
+        if field in _CONN_LOG_FIELDS
+    }
+
+
+def _parse_zeek_log(log_path):
+    logs = []
+    try:
+        with open(log_path, 'r', encoding='utf-8', errors='ignore') as handle:
+            fields, types = [], []
+            for line in handle:
+                line = line.strip()
+                if not line or line.startswith('#separator'):
+                    continue
+                if line.startswith('#fields'):
+                    fields = line.split('\t')[1:]
+                    continue
+                if line.startswith('#types'):
+                    types = line.split('\t')[1:]
+                    continue
+                if line.startswith('#'):
+                    continue
+                try:
+                    entry = json.loads(line) if line.startswith('{') else (_parse_tsv_line(line, fields, types) if fields else None)
+                except Exception:
+                    entry = None
+                if entry is not None:
+                    logs.append(entry)
+    except Exception:
+        pass
+    return logs
+
+
+def _is_bogon(addr):
+    try:
+        ip = ipaddress.ip_address(addr)
+    except Exception:
+        return True
+    if ip.is_multicast or ip.is_loopback or ip.is_unspecified or ip.is_link_local:
+        return True
+    if _CGN.supernet_of(ipaddress.ip_network(f"{ip}/32")):
+        return True
+    return ip.is_reserved and not ip.is_private
+
+
+def get_internal_tcp_udp_ip_aggregation_from_conn_log(log_path):
+    """Return unique TCP/UDP internal IPs and their count from a conn.log file."""
+    internal_ips = set()
+    try:
+        for row in _parse_zeek_log(log_path):
+            if str(row.get('proto') or '').lower() not in {'tcp', 'udp'}:
+                continue
+            if str(row.get('local_orig') or '').upper() == 'T':
+                ip = row.get('id.orig_h')
+                if ip:
+                    internal_ips.add(ip)
+            if str(row.get('local_resp') or '').upper() == 'T':
+                ip = row.get('id.resp_h')
+                if ip:
+                    internal_ips.add(ip)
+    except Exception:
+        return {'ips': [], 'count': 0}
+    filtered = sorted(addr for addr in internal_ips if not _is_bogon(addr))
+    return {'ips': filtered, 'count': len(filtered)}
 
 SCRIPTED_METRIC_INIT_MAP = "state.map = [:]"
 SCRIPTED_METRIC_COMBINE_MAP = "return state.map"
@@ -225,13 +323,11 @@ def get_all_external_ips(limit=10000):
 
 def load_zeek_ips(pcap_id):
     """Return a set of internal TCP/UDP IPs from Zeek conn.log, or None if unavailable."""
-    import os
     zeek_folder = os.getenv('ZEEK_LOGS_FOLDER', 'zeek_logs')
     log_path = os.path.join(zeek_folder, pcap_id, 'conn.log')
     if not os.path.exists(log_path):
         return None
     try:
-        from zeek_parser import get_internal_tcp_udp_ip_aggregation_from_conn_log
         return set(get_internal_tcp_udp_ip_aggregation_from_conn_log(log_path).get('ips', []))
     except Exception:
         return None
