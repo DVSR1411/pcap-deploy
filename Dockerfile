@@ -27,11 +27,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY app_deploy.py app.py
 COPY elastic.py .
 COPY aggregations.py .
-COPY zeek_parser.py .
 COPY helpers.py .
-
-# Create runtime directories
-RUN mkdir -p /app/zeek_logs
+COPY report_pdf.py .
 
 # Create non-root user
 RUN useradd -m appuser && \
