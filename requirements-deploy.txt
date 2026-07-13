@@ -7,3 +7,4 @@ python-keycloak
 requests==2.34.2
 pyzipper
 fpdf2==2.7.9
+pyminizip

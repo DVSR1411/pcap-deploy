@@ -350,8 +350,8 @@ def get_pcap_connections(pcap_id):
 @require_role('admin')
 def export_pcap_connections(pcap_id):
     import csv
-    import subprocess
     import tempfile
+    import pyminizip
 
     total = elastic.get_recent_logs_from_es(pcap_id=pcap_id, page=1, per_page=1).get('total', 0)
     if not total:
@@ -378,18 +378,14 @@ def export_pcap_connections(pcap_id):
             'Bytes':            row.get('orig_bytes') or None,
         })
 
-    zip_buf = io.BytesIO()
     with tempfile.TemporaryDirectory() as tmpdir:
         csv_path = os.path.join(tmpdir, f'{pcap_id}_connections.csv')
         zip_path = os.path.join(tmpdir, f'{pcap_id}_connections.zip')
         with open(csv_path, 'w', encoding='utf-8', newline='') as f:
             f.write(csv_buf.getvalue())
-        subprocess.run(
-            ['zip', '-j', '-P', f'admin1@{pcap_id}', zip_path, csv_path],
-            check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
+        pyminizip.compress(csv_path, None, zip_path, f'admin1@{pcap_id}', 5)
         with open(zip_path, 'rb') as f:
-            zip_buf.write(f.read())
+            zip_buf = io.BytesIO(f.read())
     zip_buf.seek(0)
     return send_file(zip_buf, mimetype='application/zip', as_attachment=True,
                      download_name=f'{pcap_id}_connections.zip')
