@@ -67,6 +67,10 @@ services:
       - ES_HOST=http://elasticsearch:9200
       - ELASTIC_USER=elastic
       - ELASTIC_PASSWORD=${ELASTIC_PASSWORD}
+      - KEYCLOAK_URL=${KEYCLOAK_URL}
+      - KEYCLOAK_REALM=${KEYCLOAK_REALM}
+      - KEYCLOAK_CLIENT_ID=${KEYCLOAK_CLIENT_ID}
+      - KEYCLOAK_CLIENT_SECRET=${KEYCLOAK_CLIENT_SECRET}
       - CEPH_RGW_ENDPOINT=http://ceph-rgw:7480
       - RGW_ACCESS_KEY=${RGW_ACCESS_KEY}
       - RGW_SECRET_KEY=${RGW_SECRET_KEY}
@@ -76,14 +80,13 @@ services:
     cpus: "1.5"
     ports:
       - "5000:5000"
-    volumes:
-      - ${ZEEK_LOGS_PATH:-./zeek_logs}:/app/zeek_logs:ro
     depends_on:
       - elasticsearch
     networks:
       - elastic
-      - sinkhole-u_keycloak_network
       - ceph-net
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     restart: unless-stopped
     logging:
       driver: "json-file"
@@ -95,7 +98,5 @@ volumes:
 networks:
   elastic:
     driver: bridge
-  sinkhole-u_keycloak_network:
-    external: true
   ceph-net:
     external: true

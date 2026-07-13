@@ -16,7 +16,7 @@ fi
 source .env
 
 echo "Step 1: Starting Elasticsearch only..."
-docker compose up -d elasticsearch
+docker-compose up -d elasticsearch
 
 echo "Step 2: Waiting for Elasticsearch to be ready..."
 sleep 30
@@ -60,11 +60,11 @@ fi
 
 echo ""
 echo "Step 7: Starting Kibana with new token..."
-docker compose up -d --no-recreate kibana
+docker-compose up -d --no-recreate kibana
 
 echo ""
 echo "Step 8: Building pcap-api image..."
-docker compose up -d --no-recreate pcap-api
+docker-compose up -d --no-recreate pcap-api
 docker network connect ceph-net pcap-api
 echo ""
 echo "========================================"
@@ -80,5 +80,5 @@ echo "Username: elastic"
 echo "Password: (from your .env file)"
 echo ""
 echo "Kibana will be ready in about 30-60 seconds..."
-echo "API image is ready to start with: docker compose up pcap-api"
+echo "API image is ready to start with: docker-compose up pcap-api"
 echo ""

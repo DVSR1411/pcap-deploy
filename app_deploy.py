@@ -72,25 +72,6 @@ except Exception as e:
 
 
 # ============= API RESPONSE HELPER =============
-def get_conn_state_description(state):
-    """Return human-readable description for Zeek connection state"""
-    states = {
-        'S0': 'SYN sent, no reply',
-        'S1': 'Connected, not closed',
-        'SF': 'Normal connect & close',
-        'REJ': 'Connection rejected',
-        'S2': 'Initiator close, no reply',
-        'S3': 'Responder close, no reply',
-        'RSTO': 'Initiator reset',
-        'RSTR': 'Responder reset',
-        'RSTOS0': 'SYN then reset',
-        'RSTRH': 'SYN-ACK then reset',
-        'SH': 'SYN then FIN',
-        'SHR': 'SYN-ACK then FIN',
-        'OTH': 'No SYN, midstream traffic'
-    }
-    return states.get(str(state).upper(), state)
-
 def api_response(data, success=True, page=None, per_page=None, total=None, total_pages=None, error=None, meta=None):
     response = {
         'success': success,
@@ -371,16 +352,12 @@ def export_pcap_connections(pcap_id):
     import csv
     import subprocess
     import tempfile
-    from elastic import _CONN_STATE_MAP
 
-    try:
-        doc = es.get(index=elastic.ZEEK_CONN_INDEX, id=pcap_id)["_source"]
-    except Exception:
-        return api_response(data=None, success=False, error='No connection data found for this pcap'), 404
-
-    logs = doc.get('connections', [])
-    if not logs:
+    total = elastic.get_recent_logs_from_es(pcap_id=pcap_id, page=1, per_page=1).get('total', 0)
+    if not total:
         return api_response(data=None, success=False, error='No connections found for this pcap'), 404
+
+    logs = elastic.get_recent_logs_from_es(pcap_id=pcap_id, page=1, per_page=total).get('logs', [])
 
     fieldnames = ['Timestamp', 'Source IP', 'Dest IP', 'Port', 'Protocol', 'Duration', 'Service', 'Conn_state_short', 'Conn_state_long', 'Bytes']
 
@@ -388,27 +365,17 @@ def export_pcap_connections(pcap_id):
     writer = csv.DictWriter(csv_buf, fieldnames=fieldnames)
     writer.writeheader()
     for row in logs:
-        ts = row.get('ts', '')
-        try:
-            ts_str = datetime.fromisoformat(str(ts)).strftime('%Y-%m-%d %H:%M:%S')
-        except Exception:
-            try:
-                ts_str = datetime.fromtimestamp(float(ts), timezone.utc).strftime('%Y-%m-%d %H:%M:%S')
-            except Exception:
-                ts_str = ts
-        conn_state = row.get('conn_state')
-        orig = row.get('orig_bytes') or 0
         writer.writerow({
-            'Timestamp':        ts_str,
-            'Source IP':        row.get('id.orig_h'),
-            'Dest IP':          row.get('id.resp_h'),
-            'Port':             row.get('id.resp_p'),
+            'Timestamp':        row.get('timestamp'),
+            'Source IP':        row.get('src_ip'),
+            'Dest IP':          row.get('dest_ip'),
+            'Port':             row.get('resp_port'),
             'Protocol':         row.get('proto'),
             'Duration':         row.get('duration'),
             'Service':          row.get('service'),
-            'Conn_state_short': conn_state,
-            'Conn_state_long':  _CONN_STATE_MAP.get(str(conn_state).upper(), conn_state) if conn_state else None,
-            'Bytes':            orig or None,
+            'Conn_state_short': row.get('conn_state'),
+            'Conn_state_long':  row.get('conn_state_desc'),
+            'Bytes':            row.get('orig_bytes') or None,
         })
 
     zip_buf = io.BytesIO()
