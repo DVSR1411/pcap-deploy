@@ -351,7 +351,7 @@ def get_pcap_connections(pcap_id):
 def export_pcap_connections(pcap_id):
     import csv
     import tempfile
-    import pyminizip
+    import pyzipper
 
     total = elastic.get_recent_logs_from_es(pcap_id=pcap_id, page=1, per_page=1).get('total', 0)
     if not total:
@@ -383,7 +383,9 @@ def export_pcap_connections(pcap_id):
         zip_path = os.path.join(tmpdir, f'{pcap_id}_connections.zip')
         with open(csv_path, 'w', encoding='utf-8', newline='') as f:
             f.write(csv_buf.getvalue())
-        pyminizip.compress(csv_path, None, zip_path, f'admin1@{pcap_id}', 5)
+        with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
+            zf.setpassword(f'admin1@{pcap_id}'.encode())
+            zf.write(csv_path, f'{pcap_id}_connections.csv')
         with open(zip_path, 'rb') as f:
             zip_buf = io.BytesIO(f.read())
     zip_buf.seek(0)
