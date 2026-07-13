@@ -40,9 +40,27 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+        
+  kibana:
+    image: docker.elastic.co/kibana/kibana:8.13.0
+    container_name: kibana
+    environment:
+      - ELASTICSEARCH_HOSTS=${ES_HOST:-http://elasticsearch:9200}
+      - ELASTICSEARCH_SERVICEACCOUNTTOKEN=${KIBANA_TOKEN}
+      - xpack.security.enabled=true
+    mem_limit: 1g
+    ports:
+      - "5601:5601"
+    networks:
+      - elastic
+    restart: unless-stopped
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   pcap-api:
-    elasticsearch:
     image: pcap-api:latest
     container_name: pcap-api
     environment:
@@ -64,6 +82,7 @@ services:
       - elasticsearch
     networks:
       - elastic
+      - sinkhole-u_keycloak_network
       - ceph-net
     restart: unless-stopped
     logging:
@@ -76,5 +95,7 @@ volumes:
 networks:
   elastic:
     driver: bridge
+  sinkhole-u_keycloak_network:
+    external: true
   ceph-net:
     external: true
