@@ -4,7 +4,6 @@ import math
 from datetime import datetime, timezone
 from elasticsearch import Elasticsearch
 from elasticsearch.exceptions import NotFoundError
-from elasticsearch.helpers import bulk, parallel_bulk
 from dotenv import load_dotenv
 
 # Load environment variables from .env file
@@ -310,100 +309,6 @@ def create_granular_indexes():
 
 # ---------------- INDEXING ----------------
 
-def bulk_index_granular_data(pcap_id, pcap_filename, summary_data, ips_data, dns_data):
-    es = get_es()
-    if not es: return
-
-    from aggregations import load_zeek_ips, classify_ip_records
-
-    actions = []
-
-    # 1. Summary Record
-    summary_data['pcap_id'] = pcap_id
-    summary_data['pcap_filename'] = pcap_filename
-    summary_data['analysis_timestamp'] = datetime.now(timezone.utc).isoformat()
-    actions.append({"_index": PCAP_METADATA_INDEX, "_id": pcap_id, "_source": summary_data})
-
-    # 2. IP Records
-    internal_ips, external_ips = classify_ip_records(ips_data, load_zeek_ips(pcap_id))
-    actions.append({
-        "_index": PCAP_IPS_INDEX,
-        "_id": pcap_id,
-        "_source": {"pcap_id": pcap_id, "external_ips": external_ips, "internal_ips": internal_ips},
-    })
-
-    # 3. DNS
-    actions.append({
-        "_index": PCAP_DNS_INDEX,
-        "_id": pcap_id,
-        "_source": {
-            "pcap_id": pcap_id,
-            "record_type": "capture_summary",
-            "pcap_filename": pcap_filename,
-            "analysis_timestamp": datetime.now(timezone.utc).isoformat(),
-            "summary": summary_data,
-            "domain_count": len(dns_data or []),
-            "domains": [
-                {k: v for k, v in d.items() if k not in ("pcap_id",)}
-                for d in (dns_data or [])
-            ],
-        }
-    })
-
-    try:
-        success, errors = bulk(es, actions, raise_on_error=False)
-        if errors:
-            print(f"  {len(errors)} records failed to index for {pcap_id}")
-        return success
-    except Exception as e:
-        print(f"Bulk indexing error: {e}")
-        return 0
-
-
-def index_pcap_files(pcap_id, files_logs):
-    """Index file records as a single doc per pcap_id with files embedded as array."""
-    es = get_es()
-    if not es:
-        return 0
-
-    from aggregations import normalise_file_log
-
-    seen = {}
-    for log in (files_logs or []):
-        record = normalise_file_log(log)
-        if record['filename'] not in seen or record['file_size'] > seen[record['filename']]['file_size']:
-            seen[record['filename']] = record
-
-    try:
-        es.index(
-            index=PCAP_FILES_INDEX,
-            id=pcap_id,
-            document={"pcap_id": pcap_id, "files": list(seen.values()), "file_count": len(seen)}
-        )
-        return len(seen)
-    except Exception as e:
-        print(f"pcap-files indexing error: {e}")
-        return 0
-
-
-def index_dashboard_document(pcap_id, dashboard_data):
-    es = get_es()
-    if not es:
-        return None
-
-    payload = dict(dashboard_data)
-    payload["file_id"] = pcap_id
-    payload["pcap_id"] = pcap_id
-    payload["analysis_timestamp"] = datetime.now(timezone.utc).isoformat()
-
-    try:
-        return es.index(index=PCAP_METADATA_INDEX, id=pcap_id, document=payload)
-    except TypeError:
-        return es.index(index=PCAP_METADATA_INDEX, id=pcap_id, body=payload)
-    except Exception as e:
-        print(f"Dashboard index error for {pcap_id}: {e}")
-        return None
-
 
 def get_dashboard_document(pcap_id):
     es = get_es()
@@ -665,52 +570,6 @@ def get_pcap_report_details(pcap_id, report_type, value):
         return []
 
 # IP intelligence helpers (stored in IP_INTEL_INDEX ΓÇö one record per unique IP)
-def index_ip_scan(scan_data):
-    es = get_es()
-    if not es: return None
-    ip = scan_data.get("ip")
-    if not ip:
-        return None
-
-    record = dict(scan_data)
-    record["intelligence_record"] = True
-    geo = record.get("geo") or {}
-    lat = geo.get("latitude") if geo.get("latitude") is not None else geo.get("lat")
-    lon = geo.get("longitude") if geo.get("longitude") is not None else geo.get("lon")
-    if lat is not None and lon is not None:
-        record["location"] = {"lat": lat, "lon": lon}
-
-    try:
-        return es.index(index=IP_INTEL_INDEX, id=ip, body=record)
-    except Exception:
-        return None
-
-
-def bulk_index_ip_scans(scan_records):
-    """
-    Bulk-upsert into IP_INTEL_INDEX. _id = ip so each IP has exactly one record.
-    Returns (success_count, error_list).
-    """
-    from aggregations import prepare_ip_intel_action, run_parallel_bulk
-
-    es = get_es()
-    if not es or not scan_records:
-        return 0, []
-
-    actions = [a for a in (prepare_ip_intel_action(r, IP_INTEL_INDEX) for r in scan_records) if a]
-    if not actions:
-        return 0, []
-
-    try:
-        success, errors = run_parallel_bulk(es, actions)
-        if errors:
-            print(f"  {len(errors)} IP intel record(s) failed bulk indexing")
-        return success, errors
-    except Exception as e:
-        print(f"Bulk IP intel indexing error: {e}")
-        return 0, [str(e)]
-        return 0, [str(e)]
-
 
 def get_external_ips_for_pcap(pcap_id):
     es = get_es()
