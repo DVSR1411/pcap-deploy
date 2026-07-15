@@ -62,7 +62,8 @@ def _parse_zeek_log(log_path):
                     entry = None
                 if entry is not None:
                     logs.append(entry)
-    except Exception:
+    except OSError as e:
+        print(f"_parse_zeek_log error reading {log_path}: {e}")
         pass
     return logs
 
@@ -103,78 +104,6 @@ SCRIPTED_METRIC_INIT_MAP = "state.map = [:]"
 SCRIPTED_METRIC_COMBINE_MAP = "return state.map"
 SCRIPTED_METRIC_REDUCE_MAP = "def out = [:]; for (s in states) { for (e in s.entrySet()) { out.put(e.getKey(), out.getOrDefault(e.getKey(), 0) + e.getValue()); } } return out"
 
-
-def get_dashboard_breakdown_totals():
-    """
-    Aggregate transport, application, and direction breakdowns.
-    Sums values from all PCAP metadata documents.
-    """
-    es = get_es()
-    if not es:
-        return {
-            "transport_breakdown": [],
-            "application_breakdown": [],
-            "direction_breakdown": []
-        }
-
-    try:
-        # Use Elasticsearch scripted_metric aggs to sum label/value pairings
-        body = {
-            "size": 0,
-            "aggs": {
-                "transport": {
-                    "scripted_metric": {
-                        "init_script": SCRIPTED_METRIC_INIT_MAP,
-                        "map_script": "if (params._source.transport_breakdown != null) { for (item in params._source.transport_breakdown) { if (item?.label != null) { def v = item.value == null ? 0 : item.value; state.map.put(item.label, (state.map.containsKey(item.label) ? state.map.get(item.label) : 0) + v) } } }",
-                        "combine_script": SCRIPTED_METRIC_COMBINE_MAP,
-                        "reduce_script": SCRIPTED_METRIC_REDUCE_MAP
-                    }
-                },
-                "application": {
-                    "scripted_metric": {
-                        "init_script": SCRIPTED_METRIC_INIT_MAP,
-                        "map_script": "if (params._source.application_breakdown != null) { for (item in params._source.application_breakdown) { if (item?.label != null) { def v = item.value == null ? 0 : item.value; state.map.put(item.label, (state.map.containsKey(item.label) ? state.map.get(item.label) : 0) + v) } } }",
-                        "combine_script": SCRIPTED_METRIC_COMBINE_MAP,
-                        "reduce_script": SCRIPTED_METRIC_REDUCE_MAP
-                    }
-                },
-                "direction": {
-                    "scripted_metric": {
-                        "init_script": SCRIPTED_METRIC_INIT_MAP,
-                        "map_script": "if (params._source.direction_breakdown != null) { for (item in params._source.direction_breakdown) { if (item?.label != null) { def v = item.value == null ? 0 : item.value; state.map.put(item.label, (state.map.containsKey(item.label) ? state.map.get(item.label) : 0) + v) } } }",
-                        "combine_script": SCRIPTED_METRIC_COMBINE_MAP,
-                        "reduce_script": SCRIPTED_METRIC_REDUCE_MAP
-                    }
-                }
-            }
-        }
-
-        res = es.search(index=PCAP_METADATA_INDEX, body=body)
-        aggs = res.get('aggregations', {})
-
-        def _map_to_list(m):
-            return [{"label": k, "value": int(v)} for k, v in sorted((m or {}).items(), key=lambda x: x[1], reverse=True)]
-
-        transport_vals = aggs.get('transport', {}).get('value') if isinstance(aggs.get('transport', {}), dict) and 'value' in aggs.get('transport', {}) else aggs.get('transport', {})
-        application_vals = aggs.get('application', {}).get('value') if isinstance(aggs.get('application', {}), dict) and 'value' in aggs.get('application', {}) else aggs.get('application', {})
-        direction_vals = aggs.get('direction', {}).get('value') if isinstance(aggs.get('direction', {}), dict) and 'value' in aggs.get('direction', {}) else aggs.get('direction', {})
-
-        # scripted_metric returns the map directly; ensure dict
-        if isinstance(transport_vals, dict) and 'map' in transport_vals:
-            transport_vals = transport_vals.get('map')
-
-        return {
-            "transport_breakdown": _map_to_list(transport_vals or {}),
-            "application_breakdown": _map_to_list(application_vals or {}),
-            "direction_breakdown": _map_to_list(direction_vals or {}),
-        }
-    except Exception as e:
-        print(f"get_dashboard_breakdown_totals error: {e}")
-        return {
-            "transport_breakdown": [],
-            "application_breakdown": [],
-            "direction_breakdown": []
-        }
 
 
 def get_country_city_map(limit=100):
@@ -323,8 +252,16 @@ def get_all_external_ips(limit=10000):
 
 def load_zeek_ips(pcap_id):
     """Return a set of internal TCP/UDP IPs from Zeek conn.log, or None if unavailable."""
+    import re
+    if not pcap_id or not re.match(r'^[a-f0-9]{6,16}$', str(pcap_id)):
+        return None
     zeek_folder = os.getenv('ZEEK_LOGS_FOLDER', 'zeek_logs')
     log_path = os.path.join(zeek_folder, pcap_id, 'conn.log')
+    # Prevent path traversal
+    base = os.path.realpath(zeek_folder)
+    resolved = os.path.realpath(log_path)
+    if not resolved.startswith(base + os.sep):
+        return None
     if not os.path.exists(log_path):
         return None
     try:
@@ -446,26 +383,35 @@ def build_matched_ips(hits):
 
 
 def enrich_packet_counts(es_client, ips_index, matched_ips, hits):
-    """Add packet counts to matched_ips by batch-fetching pcap-ips docs."""
-    pcap_ids = sorted({
-        h["_source"].get("pcap_id")
-        for h in hits
-        if h.get("_source", {}).get("pcap_id")
-    })
+    """Add packet counts to matched_ips by scanning pcap-ips for matching IPs."""
     target_ips = set(matched_ips)
-    for start in range(0, len(pcap_ids), 500):
-        mget_res = es_client.mget(
+    if not target_ips:
+        return
+
+    # Scroll all pcap-ips docs and sum packet_count for each matched IP
+    try:
+        resp = es_client.search(
             index=ips_index,
-            body={"ids": pcap_ids[start:start + 500]},
-            _source=["external_ips"]
+            body={"query": {"match_all": {}}, "_source": ["external_ips"], "size": 500},
+            scroll="2m"
         )
-        for doc in mget_res.get("docs", []):
-            if not doc.get("found"):
-                continue
-            for ip_entry in (doc.get("_source", {}).get("external_ips") or []):
-                ip = ip_entry.get("ip")
-                if ip in target_ips:
-                    matched_ips[ip]["packets"] += int(ip_entry.get("packet_count") or 0)
+        sid = resp["_scroll_id"]
+        while True:
+            hits_page = resp["hits"]["hits"]
+            if not hits_page:
+                break
+            for doc in hits_page:
+                for ip_entry in (doc["_source"].get("external_ips") or []):
+                    ip = ip_entry.get("ip")
+                    if ip in target_ips:
+                        matched_ips[ip]["packets"] += int(ip_entry.get("packet_count") or 0)
+            resp = es_client.scroll(scroll_id=sid, scroll="2m")
+        try:
+            es_client.clear_scroll(scroll_id=sid)
+        except Exception:
+            pass
+    except Exception as e:
+        print(f"enrich_packet_counts error: {e}")
 
 
 def sort_ip_rows(rows):

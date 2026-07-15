@@ -455,105 +455,8 @@ def get_latest_dashboard_document():
     except Exception:
         return None
 
-# (Legacy support for index_pcap_analysis)
-def index_pcap_analysis(pcap_id, pcap_filename, external_ips, **kwargs):
-    pass
-
 # ---------------- SEARCH & AGGREGATIONS ----------------
 
-def get_pcap_stats_from_es(pcap_id):
-    es = get_es()
-    if not es: return None
-
-    summary = get_pcap_summary(pcap_id)
-    if not summary:
-        return None
-
-    # All aggregated breakdowns are stored in pcap-metadata and zeek-conn sentinel
-    try:
-        sentinel = es.get(index="zeek-conn", id=pcap_id)["_source"]
-    except Exception:
-        sentinel = {}
-
-    trans_stats = summary.get("transport_breakdown") or sentinel.get("transport_breakdown", [])
-    app_stats   = summary.get("application_breakdown") or sentinel.get("application_breakdown", [])
-    dir_stats   = summary.get("direction_breakdown") or sentinel.get("direction_breakdown", [])
-    ports       = summary.get("ports") or sentinel.get("ports", [])
-    time_series = sentinel.get("time_series", [])
-
-    # DNS stats from pcap-dns embedded domains
-    dns_stats = []
-    try:
-        dns_doc = es.get(index=PCAP_DNS_INDEX, id=pcap_id)["_source"]
-        dns_domains = [
-            d for d in (dns_doc.get("domains") or []) if d.get("type") == "dns"
-        ]
-        dns_domains.sort(key=lambda d: d.get("count", 0), reverse=True)
-        dns_stats = [{"label": d["domain"], "value": d.get("count", 0)} for d in dns_domains[:10]]
-    except Exception:
-        pass
-
-    ext_ips = get_external_ips_for_pcap(pcap_id)
-
-    dns_records = []
-    try:
-        dns_doc = es.get(index=PCAP_DNS_INDEX, id=pcap_id)["_source"]
-        for d in (dns_doc.get("domains") or [])[:100]:
-            dns_records.append({
-                "domain": d.get("domain"),
-                "record_type": d.get("record_type"),
-                "timestamp": dns_doc.get("analysis_timestamp")
-            })
-    except Exception:
-        pass
-
-    protocols = [{"protocol": s["label"], "packet_count": s["value"]} for s in trans_stats]
-
-    return {
-        'file_id': pcap_id,
-        'file_name': summary.get('pcap_filename'),
-        'total_packets': summary.get('total_packets', 0),
-        'total_bytes': summary.get('total_bytes', 0),
-        'duration_seconds': summary.get('duration_seconds', 0),
-        'file_size': summary.get('file_size', 0),
-        'total_connections': sentinel.get('total_connections', sum(s['value'] for s in trans_stats)),
-        'exact_pcap_packets': summary.get('total_packets'),
-        'transport_breakdown': trans_stats,
-        'application_breakdown': app_stats,
-        'direction_breakdown': dir_stats,
-        'top_dns_domains': dns_stats,
-        'top_destinations': [],
-        'external_ips': ext_ips,
-        'internal_ips': get_internal_ips_for_pcap(pcap_id),
-        'dns_queries': dns_records,
-        'protocols': protocols,
-        'ports': ports,
-        'time_series': time_series,
-        'summary': summary
-    }
-
-
-def get_all_pcap_summaries():
-    es = get_es()
-    if not es: return []
-    try:
-        res = es.search(
-            index=PCAP_METADATA_INDEX,
-            body={"query": {"match_all": {}}},
-            size=1000,
-            sort=[{"analysis_timestamp": {"order": "desc"}}]
-        )
-        return [hit["_source"] for hit in res["hits"]["hits"]]
-    except Exception:
-        return []
-
-def get_pcap_summary(pcap_id):
-    es = get_es()
-    if not es: return None
-    try:
-        return es.get(index=PCAP_METADATA_INDEX, id=pcap_id)["_source"]
-    except NotFoundError:
-        return None
 
 
 def get_repository_stats():
@@ -761,27 +664,6 @@ def get_pcap_report_details(pcap_id, report_type, value):
         print(f"get_pcap_report_details error: {e}")
         return []
 
-def get_dns_breakdown(pcap_id=None):
-    es = get_es()
-    if not es: return []
-
-    query = {"match_all": {}}
-    if pcap_id: query = {"term": {"pcap_id": pcap_id}}
-
-    aggs = {
-        "domains": {
-            "terms": {"field": "domain", "size": 100},
-            "aggs": {"count": {"sum": {"field": "count"}}}
-        }
-    }
-
-    try:
-        res = es.search(index=PCAP_DNS_INDEX, body={"query": query, "aggs": aggs, "size": 0})
-        buckets = res.get("aggregations", {}).get("domains", {}).get("buckets", [])
-        return [{b["key"]: int(b.get("count", {}).get("value", 0))} for b in buckets]
-    except Exception:
-        return []
-
 # IP intelligence helpers (stored in IP_INTEL_INDEX ΓÇö one record per unique IP)
 def index_ip_scan(scan_data):
     es = get_es()
@@ -870,35 +752,6 @@ def get_dns_queries_for_pcap(pcap_id, limit=200):
         return []
 
 
-def get_ioc_domains_for_pcap(pcap_id, limit=200):
-    """Read IOC domains from the embedded array in the single pcap-dns doc."""
-    es = get_es()
-    if not es: return []
-    try:
-        doc = es.get(index=PCAP_DNS_INDEX, id=pcap_id)["_source"]
-        return [
-            {"domain": d.get("domain"), "reason": d.get("reason", "Suspicious domain")}
-            for d in (doc.get("domains") or [])
-            if d.get("is_ioc")
-        ][:limit]
-    except Exception:
-        return []
-
-
-def get_ioc_urls_for_pcap(pcap_id, limit=200):
-    """Read IOC URLs from the embedded array in the single pcap-dns doc."""
-    es = get_es()
-    if not es: return []
-    try:
-        doc = es.get(index=PCAP_DNS_INDEX, id=pcap_id)["_source"]
-        return [
-            {"url": d.get("domain"), "method": d.get("method", "GET"), "purpose": d.get("purpose", "HTTP activity")}
-            for d in (doc.get("domains") or [])
-            if d.get("type") == "http" and d.get("is_ioc")
-        ][:limit]
-    except Exception:
-        return []
-
 
 def get_ip_geo_from_pcap_ips(ip):
     """Fetch geo fields for an IP directly from pcap-ips as a fast fallback."""
@@ -978,80 +831,6 @@ def index_feedback(name, email, organisation, message, role="user"):
     }
     return es.index(index=FEEDBACK_INDEX, document=doc)
 
-
-# ---------------- LEGACY COMPAT ----------------
-
-def get_pcap_analysis(pcap_id):
-    """Fetch a single PCAP summary from the captures index."""
-    return get_pcap_summary(pcap_id)
-
-
-def get_all_pcap_analyses():
-    """Return all PCAP summaries sorted by timestamp."""
-    return get_all_pcap_summaries()
-
-
-def get_geo_grid_aggregation(precision=3):
-    """
-    Groups 50,000+ IPs into geographical clusters using Geo-Grid aggregation.
-    Returns lat/lon centroids and counts for each cluster.
-    """
-    es = get_es()
-    if not es:
-        return []
-
-    body = {
-        "size": 0,
-        "query": {
-            "bool": {
-                "must": [
-                    {"term": {"is_internal": False}}
-                ],
-                "must_not": [
-                    {"term": {"latitude": 0}},
-                    {"term": {"longitude": 0}}
-                ]
-            }
-        },
-        "aggs": {
-            "grid": {
-                "geohash_grid": {
-                    "field": "location",
-                    "precision": precision
-                },
-                "aggs": {
-                    "centroid": {
-                        "geo_centroid": {"field": "location"}
-                    },
-                    "unique_ips": {
-                        "cardinality": {"field": "ip"}
-                    }
-                }
-            }
-        }
-    }
-
-    try:
-        res = es.search(index=PCAP_IPS_INDEX, body=body)
-        buckets = res.get("aggregations", {}).get("grid", {}).get("buckets", [])
-        
-        points = []
-        for b in buckets:
-            centroid = b.get("centroid", {}).get("location", {})
-            unique_count = b.get("unique_ips", {}).get("value", 0)
-            if centroid:
-                points.append({
-                    "lat": centroid.get("lat"),
-                    "lon": centroid.get("lon"),
-                    "count": int(unique_count),
-                    "hits": b["doc_count"], # Keep original doc count as 'hits' if needed
-                    "geohash": b["key"]
-                })
-        return points
-
-    except Exception as e:
-        print(f"Geo Grid Aggregation Error: {e}")
-        return []
 
 
 def _recent_log_total(es, pcap_id):
@@ -1436,41 +1215,3 @@ def get_global_aggregation_fast():
     return stats
 
 
-def get_global_country_aggregation_fast(limit=100):
-    """ES-native aggregation for /api/map/external-ips."""
-    es = get_es()
-    if not es:
-        return []
-
-    try:
-        res = es.search(index=PCAP_IPS_INDEX, body={
-            "size": 0,
-            "aggs": {
-                "country_stats": {
-                    "scripted_metric": {
-                        "init_script": SCRIPTED_METRIC_INIT_SCRIPT,
-                        "map_script": "def pcapId = params._source.pcap_id; if (params._source.external_ips != null) { for (item in params._source.external_ips) { def country = item.country; if (country != null) { def key = country.toString(); def packets = item.packet_count == null ? 0 : item.packet_count; if (!state.map.containsKey(key)) { state.map[key] = ['count':0, 'packets':0, 'captures': new HashSet()]; } state.map[key].count += 1; state.map[key].packets += packets; if (pcapId != null) { state.map[key].captures.add(pcapId.toString()); } } } }",
-                        "combine_script": SCRIPTED_METRIC_COMBINE_SCRIPT,
-                        "reduce_script": "def out = [:]; for (s in states) { for (e in s.entrySet()) { if (!out.containsKey(e.getKey())) { out[e.getKey()] = ['count':0, 'packets':0, 'captures': new HashSet()]; } out[e.getKey()].count += e.getValue().count; out[e.getKey()].packets += e.getValue().packets; out[e.getKey()].captures.addAll(e.getValue().captures); } } return out;"
-                    }
-                }
-            }
-        })
-
-        country_map = res.get("aggregations", {}).get("country_stats", {}).get("value", {})
-        countries = []
-        for country, data in (country_map or {}).items():
-            if not country:
-                continue
-            countries.append({
-                "name": country,
-                "count": int(data.get("count", 0) or 0),
-                "packets": int(data.get("packets", 0) or 0),
-                "captures": len(set(data.get("captures", []) or [])),
-            })
-
-        countries.sort(key=lambda item: item["count"], reverse=True)
-        return countries if limit is None else countries[:limit]
-    except Exception as e:
-        print(f"get_global_country_aggregation_fast error: {e}")
-        return []
