@@ -737,7 +737,22 @@ def get_pcap_report_details(pcap_id, report_type, value):
             ip = entry.get('ip')
             if not ip:
                 continue
-            row = dict(intel_map.get(ip, entry))
+            intel = intel_map.get(ip)
+            if intel:
+                row = dict(intel)
+                # Preserve pcap-ips top-level coords as fallback when intel has none
+                if row.get('latitude') is None and entry.get('latitude') is not None:
+                    row['latitude'] = entry['latitude']
+                if row.get('longitude') is None and entry.get('longitude') is not None:
+                    row['longitude'] = entry['longitude']
+                # Also check nested geo in intel
+                geo = row.get('geo') or {}
+                if row.get('latitude') is None:
+                    row['latitude'] = geo.get('latitude') or geo.get('lat')
+                if row.get('longitude') is None:
+                    row['longitude'] = geo.get('longitude') or geo.get('lon')
+            else:
+                row = dict(entry)
             row['packet_count'] = packet_map.get(ip, 0)
             rows.append(row)
 

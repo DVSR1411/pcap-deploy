@@ -109,6 +109,7 @@ def sanitize_ip_records_for_map(ip_records):
         if not isinstance(record, dict):
             continue
         rec = dict(record)
+        # Flatten location: {lat, lon} -> latitude/longitude (pcap-ips format)
         loc = rec.get('location')
         if (rec.get('latitude') is None or rec.get('longitude') is None) and isinstance(loc, dict):
             lat = loc.get('lat')
@@ -117,6 +118,23 @@ def sanitize_ip_records_for_map(ip_records):
                 rec['latitude'] = lat
             if lon is not None:
                 rec['longitude'] = lon
+        # Flatten geo: {latitude, longitude} -> latitude/longitude (ip-intelligence format)
+        geo = rec.get('geo')
+        if (rec.get('latitude') is None or rec.get('longitude') is None) and isinstance(geo, dict):
+            lat = geo.get('latitude') if geo.get('latitude') is not None else geo.get('lat')
+            lon = geo.get('longitude') if geo.get('longitude') is not None else geo.get('lon')
+            if lat is not None:
+                rec['latitude'] = lat
+            if lon is not None:
+                rec['longitude'] = lon
+        # Flatten city/country/isp from geo if missing at top level
+        if isinstance(geo, dict):
+            if not rec.get('city'):
+                rec['city'] = geo.get('city')
+            if not rec.get('country'):
+                rec['country'] = geo.get('country')
+            if not rec.get('isp'):
+                rec['isp'] = geo.get('isp')
         rec.pop('is_internal', None)
         rec.pop('location', None)
         cleaned_records.append(rec)
@@ -461,7 +479,7 @@ def get_report_type_list(report_type):
 @require_role('admin', 'user')
 def get_report_details_path(report_type, report_value):
     try:
-        data = elastic.get_report_details(report_type, report_value)
+        data = sanitize_ip_records_for_map(elastic.get_report_details(report_type, report_value))
         return api_response(data=data, meta={
             "total_unique_ips": len(data),
             "report_type": report_type,
@@ -476,7 +494,7 @@ def get_report_details_path(report_type, report_value):
 @require_role('admin', 'user')
 def get_global_report_details(report_type, report_value):
     try:
-        data = elastic.get_report_details(report_type, report_value)
+        data = sanitize_ip_records_for_map(elastic.get_report_details(report_type, report_value))
         return api_response(data=data, meta={
             "total_unique_ips": len(data),
             "report_type": report_type,
@@ -491,7 +509,7 @@ def get_global_report_details(report_type, report_value):
 @require_role('admin', 'user')
 def get_pcap_report_details(pcap_id, report_type, report_value):
     try:
-        data = elastic.get_pcap_report_details(pcap_id, report_type, report_value)
+        data = sanitize_ip_records_for_map(elastic.get_pcap_report_details(pcap_id, report_type, report_value))
         return api_response(data=data, meta={
             "total_unique_ips": len(data),
             "report_type": report_type,
