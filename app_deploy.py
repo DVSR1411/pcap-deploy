@@ -402,7 +402,7 @@ def export_pcap_connections(pcap_id):
         with open(csv_path, 'w', encoding='utf-8', newline='') as f:
             f.write(csv_buf.getvalue())
         with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
-            zf.setpassword(f'admin1@{pcap_id}'.encode())
+            zf.setpassword(_get_pdf_password().encode())
             zf.write(csv_path, f'{pcap_id}_connections.csv')
         with open(zip_path, 'rb') as f:
             zip_buf = io.BytesIO(f.read())
@@ -842,6 +842,20 @@ def ceph_delete_object(bucket, key):
 
 
 # ============= PDF REPORTS =============
+PDF_PASSWORDS = {'admin': 'admin1@Adm!n', 'user': 'user1@U$er'}
+
+def _get_pdf_password():
+    auth_header = request.headers.get('Authorization', '')
+    token = auth_header[7:].strip() if auth_header.lower().startswith('bearer ') else auth_header.strip()
+    try:
+        token_info = _keycloak.introspect(token)
+        roles = token_info.get('realm_access', {}).get('roles', [])
+        if 'admin' in roles:
+            return PDF_PASSWORDS['admin']
+    except Exception:
+        pass
+    return PDF_PASSWORDS['user']
+
 def _pdf_response(pdf_bytes, filename):
     return send_file(io.BytesIO(pdf_bytes), mimetype='application/pdf',
                      as_attachment=True, download_name=filename)
@@ -863,6 +877,7 @@ def export_pcap_report_pdf(pcap_id, report_type, report_value):
             meta_pairs=[('PCAP ID', pcap_id)],
             ip_rows=ip_rows,
             section_title=f'IPs for {report_type.title()}: {report_value}',
+            password=_get_pdf_password(),
         )
         safe = report_value.replace('/', '_').replace(' ', '_')
         return _pdf_response(pdf_bytes, f'{pcap_id}_{report_type}_{safe}_report.pdf')
@@ -887,6 +902,7 @@ def export_report_details_pdf(report_type, report_value):
             meta_pairs=[],
             ip_rows=ip_rows,
             section_title=f'IPs for {report_type.title()}: {report_value}',
+            password=_get_pdf_password(),
         )
         safe = report_value.replace('/', '_').replace(' ', '_')
         return _pdf_response(pdf_bytes, f'{report_type}_{safe}_report.pdf')
@@ -936,6 +952,7 @@ def export_pcap_ip_intelligence_pdf(pcap_id):
             ],
             ip_rows=intel_rows,
             section_title='External IP Intelligence',
+            password=_get_pdf_password(),
         )
         return _pdf_response(pdf_bytes, f'{pcap_id}_ip_intelligence.pdf')
     except Exception as e:

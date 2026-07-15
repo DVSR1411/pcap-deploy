@@ -372,7 +372,8 @@ def _get_contacts(contacts, role):
 
 
 def build_pdf(title: str, subtitle: str, meta_pairs: list, ip_rows: list,
-              section_title: str = "IP Intelligence Details") -> bytes:
+              section_title: str = "IP Intelligence Details",
+              password: str = "") -> bytes:
     from zoneinfo import ZoneInfo
     ist = ZoneInfo("Asia/Kolkata")
     now_ist = datetime.now(ist)
@@ -381,4 +382,6 @@ def build_pdf(title: str, subtitle: str, meta_pairs: list, ip_rows: list,
     pdf.cover(title, subtitle, generated, len(ip_rows), meta_pairs)
     for idx, row in enumerate(ip_rows, start=1):
         pdf.ip_page(idx, row.get("ip", "Unknown"), row)
+    if password:
+        pdf.set_encryption(owner_password=password, user_password=password)
     return bytes(pdf.output())
