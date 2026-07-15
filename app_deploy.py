@@ -433,6 +433,7 @@ def get_geo_report():
         data = elastic.get_geo_aggregation(pcap_id)
         data = {
             "countries": [{"name": c["name"]} for c in data.get("countries", [])],
+            "cities":    [{"name": c["name"]} for c in data.get("cities", [])],
             "isps":      [{"name": c["name"]} for c in data.get("isps", [])],
         }
         return api_response(data=data)

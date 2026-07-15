@@ -2,6 +2,7 @@ version: "3.8"
 
 networks:
   ceph-net:
+    name: ceph-net
     driver: bridge
     ipam:
       config:

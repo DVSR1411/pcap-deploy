@@ -85,6 +85,7 @@ services:
     networks:
       - elastic
       - ceph-net
+      - sinkhole-u_keycloak_network
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -99,4 +100,6 @@ networks:
   elastic:
     driver: bridge
   ceph-net:
+    external: true
+  sinkhole-u_keycloak_network:
     external: true
