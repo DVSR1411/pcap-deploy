@@ -215,17 +215,6 @@ def aggregate_geo_from_es(es_client, ips_index):
     }
 
 
-def build_matched_ips(hits):
-    """Build matched_ips dict from ip-intelligence search hits, preserving full source."""
-    matched_ips = {}
-    for h in hits:
-        src = h["_source"]
-        ip = src.get("ip")
-        matched_ips[ip] = dict(src)
-        matched_ips[ip]["packets"] = 0
-    return matched_ips
-
-
 def enrich_packet_counts(es_client, ips_index, matched_ips, hits):
     """Add packet counts to matched_ips by scanning pcap-ips for matching IPs."""
     target_ips = set(matched_ips)
@@ -248,7 +237,7 @@ def enrich_packet_counts(es_client, ips_index, matched_ips, hits):
                 for ip_entry in (doc["_source"].get("external_ips") or []):
                     ip = ip_entry.get("ip")
                     if ip in target_ips:
-                        matched_ips[ip]["packets"] += int(ip_entry.get("packet_count") or 0)
+                        matched_ips[ip]["packet_count"] += int(ip_entry.get("packet_count") or 0)
             resp = es_client.scroll(scroll_id=sid, scroll="2m")
         try:
             es_client.clear_scroll(scroll_id=sid)
@@ -261,8 +250,8 @@ def enrich_packet_counts(es_client, ips_index, matched_ips, hits):
 def sort_ip_rows(rows):
     """Sort IP rows: IPs with packets first, then by descending packets, then by IP string."""
     return sorted(rows, key=lambda row: (
-        0 if (row.get("packets") or 0) > 0 else 1,
-        -(row.get("packets") or 0),
+        0 if (row.get("packet_count") or 0) > 0 else 1,
+        -(row.get("packet_count") or 0),
         str(row.get("ip") or "")
     ))
 
@@ -274,8 +263,8 @@ def filter_ips_by_field(external_ips, field, value):
         ip_field_value = ip_entry.get(field)
         if ip_field_value and ip_field_value.lower() == value.lower():
             matched.append({
-                "ip":        ip_entry.get("ip"),
-                "packets":   ip_entry.get("packet_count", 0),
+                "ip":          ip_entry.get("ip"),
+                "packet_count": ip_entry.get("packet_count", 0),
                 "isp":       ip_entry.get("isp") or "Unknown",
                 "city":      ip_entry.get("city") or "Unknown",
                 "country":   ip_entry.get("country") or "Unknown",

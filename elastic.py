@@ -463,12 +463,8 @@ def get_ip_breakdown(pcap_id=None):
 
 
 def get_report_details(report_type, value):
-    """
-    Returns a detailed list of unique IPs for a specific ISP, City, or Country.
-    Queries ip-intelligence index where geo fields are stored flat.
-    """
     import urllib.parse
-    from aggregations import build_matched_ips, enrich_packet_counts, sort_ip_rows
+    from aggregations import enrich_packet_counts, sort_ip_rows
 
     es = get_es()
     if not es: return []
@@ -483,33 +479,34 @@ def get_report_details(report_type, value):
     try:
         res = es.search(index=IP_INTEL_INDEX, body={
             "size": 10000,
+            "_source": ["ip", "geo.isp", "geo.latitude", "geo.longitude"],
             "query": {"bool": {"should": [
                 {"term": {f"{field}.keyword": value}},
                 {"match_phrase": {field: value}}
             ], "minimum_should_match": 1}}
         })
-        print(f"DEBUG: Query {field}='{value}', hits={res['hits']['total']['value']}")
-        matched_ips = build_matched_ips(res["hits"]["hits"])
-        print(f"DEBUG: Found {len(matched_ips)} IPs from ip-intelligence")
+        matched_ips = {}
+        for h in res["hits"]["hits"]:
+            src = h["_source"]
+            ip = src.get("ip")
+            if not ip:
+                continue
+            geo = src.get("geo") or {}
+            matched_ips[ip] = {
+                "ip":          ip,
+                "isp":         geo.get("isp"),
+                "latitude":    geo.get("latitude"),
+                "longitude":   geo.get("longitude"),
+                "packet_count": 0,
+            }
         if matched_ips:
-            try:
-                enrich_packet_counts(es, PCAP_IPS_INDEX, matched_ips, res["hits"]["hits"])
-            except Exception as e:
-                import traceback
-                print(f"DEBUG: Packet count lookup failed (non-critical): {e}")
-                traceback.print_exc()
+            enrich_packet_counts(es, PCAP_IPS_INDEX, matched_ips, [])
         return sort_ip_rows(matched_ips.values())
     except Exception as e:
-        import traceback
         print(f"get_report_details error: {e}")
-        traceback.print_exc()
         return []
 
 def get_pcap_report_details(pcap_id, report_type, value):
-    """
-    Returns IP intelligence for IPs in a PCAP filtered by isp/country.
-    Gets IP list from pcap-ips, then joins with ip-intelligence via mget.
-    """
     import urllib.parse
     from aggregations import filter_ips_by_field, sort_ip_rows
 
@@ -525,46 +522,7 @@ def get_pcap_report_details(pcap_id, report_type, value):
     try:
         external_ips = es.get(index=PCAP_IPS_INDEX, id=pcap_id)["_source"].get("external_ips", [])
         filtered = filter_ips_by_field(external_ips, field, value)
-        if not filtered:
-            return []
-
-        # Build packet_count lookup from pcap-ips
-        packet_map = {e['ip']: e.get('packet_count', 0) for e in filtered if e.get('ip')}
-
-        # Join with ip-intelligence via mget
-        intel_map = {}
-        mget_res = es.mget(index=IP_INTEL_INDEX, body={"ids": list(packet_map.keys())})
-        for doc in mget_res['docs']:
-            if doc.get('found'):
-                src = doc['_source']
-                intel_map[src.get('ip')] = src
-
-        # Merge: prefer intel record, fall back to pcap-ips data, always attach packet_count
-        rows = []
-        for entry in filtered:
-            ip = entry.get('ip')
-            if not ip:
-                continue
-            intel = intel_map.get(ip)
-            if intel:
-                row = dict(intel)
-                # Preserve pcap-ips top-level coords as fallback when intel has none
-                if row.get('latitude') is None and entry.get('latitude') is not None:
-                    row['latitude'] = entry['latitude']
-                if row.get('longitude') is None and entry.get('longitude') is not None:
-                    row['longitude'] = entry['longitude']
-                # Also check nested geo in intel
-                geo = row.get('geo') or {}
-                if row.get('latitude') is None:
-                    row['latitude'] = geo.get('latitude') or geo.get('lat')
-                if row.get('longitude') is None:
-                    row['longitude'] = geo.get('longitude') or geo.get('lon')
-            else:
-                row = dict(entry)
-            row['packet_count'] = packet_map.get(ip, 0)
-            rows.append(row)
-
-        return sort_ip_rows(rows)
+        return sort_ip_rows(filtered)
     except Exception as e:
         print(f"get_pcap_report_details error: {e}")
         return []
