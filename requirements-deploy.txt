@@ -5,6 +5,5 @@ boto3==1.34.0
 Flask-Cors==4.0.1
 python-keycloak
 requests==2.34.2
-pyzipper
 fpdf2==2.7.9
-pyzipper
+gunicorn

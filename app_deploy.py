@@ -27,6 +27,7 @@ urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
 basedir = os.path.abspath(os.path.dirname(__file__))
 app = Flask(__name__)
+app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024 * 1024  # 10 GB
 CORS(app)
 
 # ============= KEYCLOAK =============
@@ -369,7 +370,7 @@ def get_pcap_connections(pcap_id):
 def export_pcap_connections(pcap_id):
     import csv
     import tempfile
-    import pyzipper
+    import subprocess
 
     total = elastic.get_recent_logs_from_es(pcap_id=pcap_id, page=1, per_page=1).get('total', 0)
     if not total:
@@ -401,9 +402,10 @@ def export_pcap_connections(pcap_id):
         zip_path = os.path.join(tmpdir, f'{pcap_id}_connections.zip')
         with open(csv_path, 'w', encoding='utf-8', newline='') as f:
             f.write(csv_buf.getvalue())
-        with pyzipper.AESZipFile(zip_path, 'w', compression=pyzipper.ZIP_DEFLATED, encryption=pyzipper.WZ_AES) as zf:
-            zf.setpassword(_get_pdf_password().encode())
-            zf.write(csv_path, f'{pcap_id}_connections.csv')
+        subprocess.run(
+            ['zip', '-j', '-P', f'admin1@{pcap_id}', zip_path, csv_path],
+            check=True, capture_output=True
+        )
         with open(zip_path, 'rb') as f:
             zip_buf = io.BytesIO(f.read())
     zip_buf.seek(0)

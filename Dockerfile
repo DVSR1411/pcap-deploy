@@ -7,7 +7,7 @@ WORKDIR /app
 # Apply latest Debian security updates
 RUN apt-get update && \
     apt-get upgrade -y && \
-    apt-get install -y --no-install-recommends curl && \
+    apt-get install -y --no-install-recommends curl zip && \
     rm -rf /var/lib/apt/lists/*
 
 # Upgrade Python packaging tools
@@ -51,4 +51,4 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD curl -fsS http://localhost:5000/api/health || exit 1
 
 # Start application
-CMD ["python", "app.py"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--timeout", "300", "--workers", "2", "--worker-class", "sync", "--max-requests", "1000", "app:app"]
