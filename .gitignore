@@ -12,3 +12,4 @@ conftest.py
 test/
 *.tar
 *.pdf
+*.zip

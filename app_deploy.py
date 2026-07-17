@@ -814,8 +814,10 @@ def ceph_upload_object(bucket, key):
     if 'file' not in request.files:
         return api_response(data=None, success=False, error='file is required'), 400
     try:
+        from boto3.s3.transfer import TransferConfig
         f = request.files['file']
-        _s3().upload_fileobj(f, bucket, key)
+        config = TransferConfig(multipart_threshold=50*1024*1024, multipart_chunksize=50*1024*1024, max_concurrency=4)
+        _s3().upload_fileobj(f, bucket, key, Config=config)
         return api_response(data={'bucket': bucket, 'key': key})
     except ClientError as e:
         return api_response(data=None, success=False, error=str(e)), 500
